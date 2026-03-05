@@ -15,9 +15,10 @@ pub struct Player {
 
 impl Player {
     pub const RTSP_PREFIX: &'static str = "rtsp://";
+    pub const RTMP_PREFIX: &'static str = "rtmp://";
 
     pub fn Create(uri: String, video_client: Box<dyn IVideoClient + Send>) -> Option<Self> {
-        if !uri.contains(Self::RTSP_PREFIX) {
+        if !uri.contains(Self::RTSP_PREFIX) && !uri.contains(Self::RTMP_PREFIX) {
             if std::fs::File::open(&uri).is_err() {
                 Debug::LogError(&format!("File does not exist at given uri: {}", uri));
                 return None;

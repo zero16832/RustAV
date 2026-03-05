@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 use crate::AVLibFileSource::AVLibFileSource;
+use crate::AVLibRTMPSource::AVLibRTMPSource;
 use crate::AVLibRTSPSource::AVLibRTSPSource;
 use crate::AVLibVideoDecoder::AVLibVideoDecoder;
 use crate::IAVLibDecoderVisitor::IAVLibDecoderVisitor;
@@ -39,6 +40,10 @@ impl AVLibDecoder {
 
         if let Some(rtsp_source) = any_source.downcast_ref::<AVLibRTSPSource>() {
             return rtsp_source.VideoDecoder(stream_index);
+        }
+
+        if let Some(rtmp_source) = any_source.downcast_ref::<AVLibRTMPSource>() {
+            return rtmp_source.VideoDecoder(stream_index);
         }
 
         None

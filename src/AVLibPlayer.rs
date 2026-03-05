@@ -2,6 +2,7 @@
 
 use crate::AVLibDecoder::AVLibDecoder;
 use crate::AVLibFileSource::AVLibFileSource;
+use crate::AVLibRTMPSource::AVLibRTMPSource;
 use crate::AVLibRTSPSource::AVLibRTSPSource;
 use crate::IAVLibSource::IAVLibSource;
 use crate::IFrameVisitor::IFrameVisitor;
@@ -33,6 +34,7 @@ pub struct AVLibPlayer {
 
 impl AVLibPlayer {
     const RTSP_PREFIX: &'static str = "rtsp://";
+    const RTMP_PREFIX: &'static str = "rtmp://";
     const CONNECT_RETRY_MILLISECONDS: u64 = 2500;
 
     fn ProcessWideInitialize() {
@@ -123,6 +125,8 @@ impl AVLibPlayer {
 
         let source_box: Box<dyn IAVLibSource + Send> = if uri.contains(Self::RTSP_PREFIX) {
             Box::new(AVLibRTSPSource::new(uri.clone()))
+        } else if uri.contains(Self::RTMP_PREFIX) {
+            Box::new(AVLibRTMPSource::new(uri.clone()))
         } else {
             Box::new(AVLibFileSource::new(uri.clone()))
         };

@@ -146,9 +146,9 @@ unsafe fn run_test(uris: &[String], loop_players: bool) {
     sdl::SDL_Quit();
 }
 
-unsafe fn allocation_test() {
+unsafe fn allocation_test(rtsp_uri: &str) {
     let client = TextureClient::from_null_writer(1280, 800);
-    let _ = Player::Create("rtsp://localhost:554/stream0".to_string(), Box::new(client));
+    let _ = Player::Create(rtsp_uri.to_string(), Box::new(client));
 }
 
 unsafe fn rtsp_test(multiple: bool) {
@@ -253,12 +253,17 @@ fn main() {
     }
 
     fn print_usage() {
-        println!("Usage: test_player [--case=<name>] [--max-seconds=<seconds>]");
-        println!("Cases: file_loop, file_once, invalid_uri, alloc_rtsp, rtsp_single, rtsp_multi");
+        println!(
+            "Usage: test_player [--case=<name>] [--max-seconds=<seconds>] [--uri=<stream_uri>]"
+        );
+        println!(
+            "Cases: file_loop, file_once, invalid_uri, alloc_stream, alloc_rtsp, alloc_rtmp, rtsp_single, rtmp_single, rtsp_multi"
+        );
     }
 
     let mut case = String::from("file_loop");
     let mut max_seconds: Option<f64> = None;
+    let mut stream_uri = String::from("rtsp://localhost:554/stream0");
     let mut parse_error = false;
     let mut show_help = false;
 
@@ -284,6 +289,11 @@ fn main() {
             continue;
         }
 
+        if let Some(v) = arg.strip_prefix("--uri=") {
+            stream_uri = v.to_string();
+            continue;
+        }
+
         eprintln!("Unknown argument: {}", arg);
         parse_error = true;
     }
@@ -298,7 +308,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    let run_result = |case_name: &str, max_secs: Option<f64>| -> i32 {
+    let run_result = |case_name: &str, max_secs: Option<f64>, stream_uri_arg: &str| -> i32 {
         unsafe fn run_case_with_sdl(
             uris: Vec<String>,
             loop_players: bool,
@@ -330,16 +340,16 @@ fn main() {
                     max_secs,
                     false,
                 ),
-                "alloc_rtsp" => {
-                    allocation_test();
+                "alloc_stream" | "alloc_rtsp" | "alloc_rtmp" => {
+                    allocation_test(stream_uri_arg);
                     0
                 }
-                "rtsp_single" => run_case_with_sdl(
-                    vec!["rtsp://localhost:554/stream0".to_string()],
-                    false,
-                    max_secs,
-                    true,
-                ),
+                "rtsp_single" => {
+                    run_case_with_sdl(vec![stream_uri_arg.to_string()], false, max_secs, true)
+                }
+                "rtmp_single" => {
+                    run_case_with_sdl(vec![stream_uri_arg.to_string()], false, max_secs, true)
+                }
                 "rtsp_multi" => run_case_with_sdl(
                     vec![
                         "rtsp://localhost:554/stream0".to_string(),
@@ -363,7 +373,7 @@ fn main() {
         run_memory_checkpoint();
         Initialize(false);
 
-        let code = run_result(&case, max_seconds);
+        let code = run_result(&case, max_seconds, &stream_uri);
 
         Teardown();
 

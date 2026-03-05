@@ -13,6 +13,7 @@ pub mod AVLibFrame;
 pub mod AVLibPacket;
 pub mod AVLibPacketRecycler;
 pub mod AVLibPlayer;
+pub mod AVLibRTMPSource;
 pub mod AVLibRTSPSource;
 pub mod AVLibUtil;
 pub mod AVLibVideoDecoder;

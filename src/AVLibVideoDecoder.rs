@@ -84,27 +84,8 @@ impl AVLibVideoDecoder {
         let t_continue_condition = continue_condition.clone();
 
         obj._thread = Some(thread::spawn(move || {
-            let mut scaler = match SwsContext::get(
-                decoder.format(),
-                decoder.width(),
-                decoder.height(),
-                target_pixel,
-                t_target_width,
-                t_target_height,
-                Flags::BILINEAR,
-            ) {
-                Ok(s) => s,
-                Err(_) => {
-                    let mut eof = VideoFrame::new(
-                        t_target_width as i32,
-                        t_target_height as i32,
-                        target_format,
-                    );
-                    eof.SetAsEOF();
-                    t_parsed.Push(eof);
-                    return;
-                }
-            };
+            let mut scaler: Option<SwsContext> = None;
+            let mut scaler_source: Option<(ffmpeg_next::format::Pixel, u32, u32)> = None;
 
             let mut rgb_frame =
                 ffmpeg_next::util::frame::Video::new(target_pixel, t_target_width, t_target_height);
@@ -176,14 +157,60 @@ impl AVLibVideoDecoder {
                 t_parsed.Push(eof);
             };
             let mut drain_decoded_frames = |decoder: &mut ffmpeg_next::decoder::Video,
-                                            scaler: &mut SwsContext,
+                                            scaler: &mut Option<SwsContext>,
+                                            scaler_source: &mut Option<(
+                ffmpeg_next::format::Pixel,
+                u32,
+                u32,
+            )>,
                                             rgb_frame: &mut ffmpeg_next::util::frame::Video|
              -> DrainStatus {
                 let mut decoded = ffmpeg_next::util::frame::Video::empty();
                 loop {
                     match decoder.receive_frame(&mut decoded) {
                         Ok(()) => {
-                            if scaler.run(&decoded, rgb_frame).is_err() {
+                            let decoded_fmt = decoded.format();
+                            let decoded_w = decoded.width();
+                            let decoded_h = decoded.height();
+
+                            let needs_rebuild = match scaler_source {
+                                Some((fmt, w, h)) => {
+                                    *fmt != decoded_fmt || *w != decoded_w || *h != decoded_h
+                                }
+                                None => true,
+                            };
+
+                            if needs_rebuild {
+                                match SwsContext::get(
+                                    decoded_fmt,
+                                    decoded_w,
+                                    decoded_h,
+                                    target_pixel,
+                                    t_target_width,
+                                    t_target_height,
+                                    Flags::BILINEAR,
+                                ) {
+                                    Ok(new_scaler) => {
+                                        *scaler = Some(new_scaler);
+                                        *scaler_source = Some((decoded_fmt, decoded_w, decoded_h));
+                                        crate::Logging::Debug::Debug::Log(&format!(
+                                            "[AVLibVideoDecoder] stream={} rebuild_scaler {}x{} -> {}x{}",
+                                            stream_idx,
+                                            decoded_w,
+                                            decoded_h,
+                                            t_target_width,
+                                            t_target_height
+                                        ));
+                                    }
+                                    Err(_) => return DrainStatus::Failed,
+                                }
+                            }
+
+                            let Some(scaler_ref) = scaler.as_mut() else {
+                                return DrainStatus::Failed;
+                            };
+
+                            if scaler_ref.run(&decoded, rgb_frame).is_err() {
                                 return DrainStatus::Failed;
                             }
 
@@ -230,7 +257,12 @@ impl AVLibVideoDecoder {
                     if p.IsEOF() {
                         let _ = decoder.send_eof();
                         if matches!(
-                            drain_decoded_frames(&mut decoder, &mut scaler, &mut rgb_frame),
+                            drain_decoded_frames(
+                                &mut decoder,
+                                &mut scaler,
+                                &mut scaler_source,
+                                &mut rgb_frame
+                            ),
                             DrainStatus::ReachedEof
                         ) {
                             push_eof_frame();
@@ -275,7 +307,12 @@ impl AVLibVideoDecoder {
                         );
                     }
 
-                    match drain_decoded_frames(&mut decoder, &mut scaler, &mut rgb_frame) {
+                    match drain_decoded_frames(
+                        &mut decoder,
+                        &mut scaler,
+                        &mut scaler_source,
+                        &mut rgb_frame,
+                    ) {
                         DrainStatus::ReachedEof => {
                             push_eof_frame();
                         }
