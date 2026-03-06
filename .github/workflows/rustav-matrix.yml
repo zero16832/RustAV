@@ -251,11 +251,11 @@ jobs:
 
       - name: Build iOS Device Library
         run: |
-          cargo build --release --lib --locked --target aarch64-apple-ios --features mobile-ffmpeg-build
+          cargo rustc --release --lib --locked --target aarch64-apple-ios --features mobile-ffmpeg-build -- --crate-type staticlib
 
       - name: Build iOS Simulator Library
         run: |
-          cargo build --release --lib --locked --target aarch64-apple-ios-sim --features mobile-ffmpeg-build
+          cargo rustc --release --lib --locked --target aarch64-apple-ios-sim --features mobile-ffmpeg-build -- --crate-type staticlib
 
       - name: Package iOS XCFramework
         run: |

@@ -55,8 +55,8 @@
 2. GitHub Actions 使用 `macos-latest + Xcode + rustup targets`。
 3. FFmpeg 与 Android 一样，改为通过 `mobile-ffmpeg-build -> ffmpeg-next/build` 在云端从源码构建。
 4. 当前云端构建命令是：
-   - `cargo build --release --lib --locked --target aarch64-apple-ios --features mobile-ffmpeg-build`
-   - `cargo build --release --lib --locked --target aarch64-apple-ios-sim --features mobile-ffmpeg-build`
+   - `cargo rustc --release --lib --locked --target aarch64-apple-ios --features mobile-ffmpeg-build -- --crate-type staticlib`
+   - `cargo rustc --release --lib --locked --target aarch64-apple-ios-sim --features mobile-ffmpeg-build -- --crate-type staticlib`
 5. 构建完成后通过 `xcodebuild -create-xcframework` 打包 `RustAV.xcframework` 并上传 artifact。
 
 ### Unity 侧接入
