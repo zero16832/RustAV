@@ -1,386 +1,429 @@
-use rustav_native::Logging::Debug::{Debug, Initialize, Teardown};
-use rustav_native::Player::Player;
-use rustav_native::SDLWindow::SDLWindow;
-use rustav_native::TextureClient::TextureClient;
-use sdl2_sys as sdl;
-use std::sync::Mutex;
-use std::thread;
-use std::time::{Duration, Instant};
-
-lazy_static::lazy_static! {
-    static ref G_MUTEX: Mutex<()> = Mutex::new(());
-    static ref MEMORY_CHECKPOINT_WORKING_SET: Mutex<Option<usize>> = Mutex::new(None);
-}
-
-unsafe fn run_test_player(uri: &str, x: i32, y: i32, w: i32, h: i32) {
-    let _setup_lock = G_MUTEX.lock().unwrap();
-    let _window = SDLWindow::new(uri.to_string(), x, y, w, h);
-}
-
-unsafe fn create_players(uris: &[String], windows: &[SDLWindow]) -> Option<Vec<Player>> {
-    let mut players = Vec::new();
-
-    for (i, uri) in uris.iter().enumerate() {
-        let client = TextureClient::from_sdl_window(&windows[i]);
-        let player = Player::Create(uri.clone(), Box::new(client))?;
-        players.push(player);
-    }
-
-    Some(players)
-}
-
-unsafe fn create_windows(
-    uris: &[String],
-    w: i32,
-    h: i32,
-    xp: i32,
-    yp: i32,
-) -> Option<Vec<SDLWindow>> {
-    let mut windows = Vec::new();
-
-    for (i, uri) in uris.iter().enumerate() {
-        let window = SDLWindow::new(uri.clone(), xp * (i as i32 + 1) + i as i32 * w, yp, w, h)?;
-
-        windows.push(window);
-    }
-
-    Some(windows)
-}
-
-unsafe fn create_players_and_run(
-    uris: &[String],
-    w: i32,
-    h: i32,
-    xp: i32,
-    yp: i32,
-    loop_players: bool,
-    max_seconds: Option<f64>,
-) -> bool {
-    let mut windows = match create_windows(uris, w, h, xp, yp) {
-        Some(v) if !v.is_empty() => v,
-        _ => return false,
-    };
-
-    let mut players = match create_players(uris, &windows) {
-        Some(v) if !v.is_empty() => v,
-        _ => return false,
-    };
-
-    let mut quit = false;
-    let start = Instant::now();
-
-    for player in players.iter_mut() {
-        player.Play();
-        if loop_players {
-            player.SetLoop(true);
-        }
-    }
-
-    while !quit {
-        if let Some(limit) = max_seconds {
-            if limit > 0.0 && start.elapsed().as_secs_f64() >= limit {
-                break;
-            }
-        }
-
-        let mut event = std::mem::zeroed::<sdl::SDL_Event>();
-        while sdl::SDL_PollEvent(&mut event) != 0 {
-            if event.type_ == sdl::SDL_EventType::SDL_WINDOWEVENT as u32 {
-                let window_id = event.window.windowID;
-
-                let mut remove_index: Option<usize> = None;
-                for i in 0..windows.len() {
-                    if windows[i].WindowId() == window_id {
-                        if event.window.event as u32
-                            == sdl::SDL_WindowEventID::SDL_WINDOWEVENT_CLOSE as u32
-                        {
-                            remove_index = Some(i);
-                        } else {
-                            windows[i].HandleEvent(event);
-                        }
-                        break;
-                    }
-                }
-
-                if let Some(i) = remove_index {
-                    windows.remove(i);
-                    players.remove(i);
-                    if windows.is_empty() {
-                        quit = true;
-                    }
-                }
-            }
-        }
-
-        for player in players.iter_mut() {
-            player.Write();
-        }
-
-        thread::sleep(Duration::from_micros(50_000));
-    }
-
-    true
-}
-
-unsafe fn run_test(uris: &[String], loop_players: bool) {
-    if sdl::SDL_Init((sdl::SDL_INIT_VIDEO | sdl::SDL_INIT_EVENTS) as u32) < 0 {
-        Debug::Log("SDL Failed to initialize");
-        return;
-    }
-
-    let width = 640;
-    let height = 400;
-    let x_padding = 30;
-    let y_padding = 60;
-
-    let _ = create_players_and_run(
-        uris,
-        width,
-        height,
-        x_padding,
-        y_padding,
-        loop_players,
-        None,
-    );
-
-    sdl::SDL_Quit();
-}
-
-unsafe fn allocation_test(rtsp_uri: &str) {
-    let client = TextureClient::from_null_writer(1280, 800);
-    let _ = Player::Create(rtsp_uri.to_string(), Box::new(client));
-}
-
-unsafe fn rtsp_test(multiple: bool) {
-    let mut uris = vec!["rtsp://localhost:554/stream0".to_string()];
-
-    if multiple {
-        uris.push("rtsp://localhost:555/stream1".to_string());
-        uris.push("rtsp://localhost:556/stream2".to_string());
-        uris.push("rtsp://localhost:557/stream3".to_string());
-    }
-
-    run_test(&uris, false);
-}
-
-unsafe fn file_test(loop_players: bool) {
-    let uris = vec![sample_video_uri()];
-    run_test(&uris, loop_players);
-}
-
-unsafe fn file_test_invalid_uri() {
-    let uris = vec!["invaliduri.invaliduri".to_string()];
-    run_test(&uris, false);
-}
-
-fn sample_video_uri() -> String {
-    let candidates = [
-        "../TestFiles/SampleVideo_1280x720_10mb.mp4",
-        "TestFiles/SampleVideo_1280x720_10mb.mp4",
-        "./TestFiles/SampleVideo_1280x720_10mb.mp4",
-    ];
-
-    for c in candidates {
-        if std::path::Path::new(c).exists() {
-            return c.to_string();
-        }
-    }
-
-    candidates[0].to_string()
-}
-
-#[cfg(windows)]
-unsafe fn current_working_set_size() -> Option<usize> {
-    use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-    use windows::Win32::System::Threading::GetCurrentProcess;
-
-    let process = GetCurrentProcess();
-    let mut counters = PROCESS_MEMORY_COUNTERS::default();
-    let ok = K32GetProcessMemoryInfo(
-        process,
-        &mut counters as *mut _ as *mut _,
-        std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-    )
-    .as_bool();
-
-    if ok {
-        Some(counters.WorkingSetSize)
-    } else {
-        None
-    }
-}
-
-#[cfg(windows)]
-unsafe fn run_memory_checkpoint() {
-    let mut checkpoint = MEMORY_CHECKPOINT_WORKING_SET.lock().unwrap();
-    *checkpoint = current_working_set_size();
-}
-
-#[cfg(windows)]
-unsafe fn dump_memory_checkpoint() {
-    let checkpoint = MEMORY_CHECKPOINT_WORKING_SET.lock().unwrap();
-    let Some(base) = *checkpoint else {
-        return;
-    };
-
-    let Some(current) = current_working_set_size() else {
-        return;
-    };
-
-    let delta = current as i64 - base as i64;
-    Debug::Log(&format!(
-        "[MemoryCheckpoint] working_set_base={} current={} delta={}",
-        base, current, delta
-    ));
-}
-
 #[cfg(not(windows))]
-unsafe fn run_memory_checkpoint() {}
-
-#[cfg(not(windows))]
-unsafe fn dump_memory_checkpoint() {}
-
 fn main() {
-    if std::env::args().len() == 1 {
-        unsafe {
-            run_memory_checkpoint();
-            Initialize(false);
-            file_test(true);
-            Teardown();
-            dump_memory_checkpoint();
+    eprintln!("test_player 仅支持 Windows");
+    std::process::exit(1);
+}
+
+#[cfg(windows)]
+mod win32_player {
+    use rustav_native::FrameExportClient::SharedExportedFrameState;
+    use rustav_native::Logging::Debug::{Initialize, Teardown};
+    use rustav_native::Player::Player;
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::thread;
+    use std::time::{Duration, Instant};
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        BeginPaint, EndPaint, InvalidateRect, StretchDIBits, UpdateWindow, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBRUSH, PAINTSTRUCT, SRCCOPY,
+    };
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+        GetClientRect, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassW, ShowWindow,
+        TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HMENU, IDC_ARROW, MSG,
+        PM_REMOVE, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_PAINT, WM_QUIT, WNDCLASSW,
+        WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    };
+
+    static VIEWER_STATE: OnceLock<Arc<Mutex<ViewerState>>> = OnceLock::new();
+
+    struct Config {
+        uri: String,
+        width: i32,
+        height: i32,
+        max_seconds: Option<f64>,
+        loop_player: bool,
+    }
+
+    struct ViewerState {
+        source_width: i32,
+        source_height: i32,
+        stride: i32,
+        rgba_buffer: Vec<u8>,
+        bgra_buffer: Vec<u8>,
+        has_frame: bool,
+        last_frame_index: i64,
+        last_time_sec: f64,
+        title: String,
+    }
+
+    impl ViewerState {
+        fn new(width: i32, height: i32, title: String) -> Self {
+            let pixel_bytes = width.saturating_mul(height).saturating_mul(4).max(0) as usize;
+            Self {
+                source_width: width,
+                source_height: height,
+                stride: width.saturating_mul(4),
+                rgba_buffer: vec![0; pixel_bytes],
+                bgra_buffer: vec![0; pixel_bytes],
+                has_frame: false,
+                last_frame_index: -1,
+                last_time_sec: 0.0,
+                title,
+            }
         }
-        return;
+    }
+
+    fn parse_args() -> Result<Config, String> {
+        let mut uri = sample_video_uri();
+        let mut width = 1280;
+        let mut height = 720;
+        let mut max_seconds = None;
+        let mut loop_player = false;
+
+        for arg in std::env::args().skip(1) {
+            if arg == "--help" || arg == "-h" {
+                print_usage();
+                std::process::exit(0);
+            }
+
+            if arg == "--loop" {
+                loop_player = true;
+                continue;
+            }
+
+            if let Some(v) = arg.strip_prefix("--uri=") {
+                uri = v.to_string();
+                continue;
+            }
+
+            if let Some(v) = arg.strip_prefix("--width=") {
+                width = v
+                    .parse::<i32>()
+                    .map_err(|_| format!("无效的 --width 参数: {v}"))?;
+                continue;
+            }
+
+            if let Some(v) = arg.strip_prefix("--height=") {
+                height = v
+                    .parse::<i32>()
+                    .map_err(|_| format!("无效的 --height 参数: {v}"))?;
+                continue;
+            }
+
+            if let Some(v) = arg.strip_prefix("--max-seconds=") {
+                max_seconds = Some(
+                    v.parse::<f64>()
+                        .map_err(|_| format!("无效的 --max-seconds 参数: {v}"))?,
+                );
+                continue;
+            }
+
+            return Err(format!("未知参数: {arg}"));
+        }
+
+        if width <= 0 || height <= 0 {
+            return Err("width 和 height 必须大于 0".to_string());
+        }
+
+        Ok(Config {
+            uri,
+            width,
+            height,
+            max_seconds,
+            loop_player,
+        })
     }
 
     fn print_usage() {
-        println!(
-            "Usage: test_player [--case=<name>] [--max-seconds=<seconds>] [--uri=<stream_uri>]"
-        );
-        println!(
-            "Cases: file_loop, file_once, invalid_uri, alloc_stream, alloc_rtsp, alloc_rtmp, rtsp_single, rtmp_single, rtsp_multi"
-        );
+        println!("Usage: test_player [--uri=<uri>] [--width=<w>] [--height=<h>] [--max-seconds=<n>] [--loop]");
+        println!("默认使用 TestFiles 里的 sample video；也可直接传 rtsp:// 或 rtmp://");
     }
 
-    let mut case = String::from("file_loop");
-    let mut max_seconds: Option<f64> = None;
-    let mut stream_uri = String::from("rtsp://localhost:554/stream0");
-    let mut parse_error = false;
-    let mut show_help = false;
+    fn sample_video_uri() -> String {
+        let candidates = [
+            "../TestFiles/SampleVideo_1280x720_10mb.mp4",
+            "TestFiles/SampleVideo_1280x720_10mb.mp4",
+            "./TestFiles/SampleVideo_1280x720_10mb.mp4",
+        ];
 
-    for arg in std::env::args().skip(1) {
-        if arg == "--help" || arg == "-h" {
-            show_help = true;
-            continue;
+        for candidate in candidates {
+            if std::path::Path::new(candidate).exists() {
+                return candidate.to_string();
+            }
         }
 
-        if let Some(v) = arg.strip_prefix("--case=") {
-            case = v.to_string();
-            continue;
+        candidates[0].to_string()
+    }
+
+    fn to_wstring(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(Some(0)).collect()
+    }
+
+    fn pull_latest_frame(
+        shared: &SharedExportedFrameState,
+        viewer_state: &Arc<Mutex<ViewerState>>,
+    ) -> bool {
+        let shared = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let meta = shared.Meta();
+        if !meta.HasFrame {
+            return false;
         }
 
-        if let Some(v) = arg.strip_prefix("--max-seconds=") {
-            match v.parse::<f64>() {
-                Ok(parsed) => max_seconds = Some(parsed),
-                Err(_) => {
-                    eprintln!("Invalid value for --max-seconds: {}", v);
-                    parse_error = true;
+        let mut viewer = viewer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if meta.FrameIndex == viewer.last_frame_index {
+            return false;
+        }
+
+        if meta.Width <= 0 || meta.Height <= 0 || meta.DataLength <= 0 {
+            return false;
+        }
+
+        let data_len = meta.DataLength as usize;
+        if viewer.rgba_buffer.len() != data_len {
+            viewer.rgba_buffer.resize(data_len, 0);
+        }
+        if viewer.bgra_buffer.len() != data_len {
+            viewer.bgra_buffer.resize(data_len, 0);
+        }
+
+        let copied = shared.CopyTo(&mut viewer.rgba_buffer);
+        if copied <= 0 {
+            return false;
+        }
+
+        let pixel_count = data_len / 4;
+        for index in 0..pixel_count {
+            let offset = index * 4;
+            viewer.bgra_buffer[offset] = viewer.rgba_buffer[offset + 2];
+            viewer.bgra_buffer[offset + 1] = viewer.rgba_buffer[offset + 1];
+            viewer.bgra_buffer[offset + 2] = viewer.rgba_buffer[offset];
+            viewer.bgra_buffer[offset + 3] = viewer.rgba_buffer[offset + 3];
+        }
+
+        viewer.source_width = meta.Width;
+        viewer.source_height = meta.Height;
+        viewer.stride = meta.Stride;
+        viewer.has_frame = true;
+        viewer.last_frame_index = meta.FrameIndex;
+        viewer.last_time_sec = meta.Time;
+        true
+    }
+
+    unsafe extern "system" fn window_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_PAINT => {
+                let mut paint = PAINTSTRUCT::default();
+                let hdc = BeginPaint(hwnd, &mut paint);
+
+                if let Some(viewer_state) = VIEWER_STATE.get() {
+                    let viewer = viewer_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+                    if viewer.has_frame && !viewer.bgra_buffer.is_empty() {
+                        let mut info = BITMAPINFO::default();
+                        info.bmiHeader = BITMAPINFOHEADER {
+                            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                            biWidth: viewer.source_width,
+                            biHeight: -viewer.source_height,
+                            biPlanes: 1,
+                            biBitCount: 32,
+                            biCompression: BI_RGB.0,
+                            ..Default::default()
+                        };
+
+                        let mut rect = RECT::default();
+                        let _ = GetClientRect(hwnd, &mut rect);
+                        let dest_width = rect.right - rect.left;
+                        let dest_height = rect.bottom - rect.top;
+
+                        let _ = StretchDIBits(
+                            hdc,
+                            0,
+                            0,
+                            dest_width,
+                            dest_height,
+                            0,
+                            0,
+                            viewer.source_width,
+                            viewer.source_height,
+                            Some(viewer.bgra_buffer.as_ptr() as *const c_void),
+                            &info,
+                            DIB_RGB_COLORS,
+                            SRCCOPY,
+                        );
+                    }
                 }
+
+                let _ = EndPaint(hwnd, &paint);
+                LRESULT(0)
             }
-            continue;
+            WM_CLOSE => {
+                let _ = DestroyWindow(hwnd);
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                PostQuitMessage(0);
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
-
-        if let Some(v) = arg.strip_prefix("--uri=") {
-            stream_uri = v.to_string();
-            continue;
-        }
-
-        eprintln!("Unknown argument: {}", arg);
-        parse_error = true;
     }
 
-    if show_help {
-        print_usage();
-        std::process::exit(0);
-    }
+    unsafe fn create_window(title: &str, width: i32, height: i32) -> Result<HWND, String> {
+        let instance = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW failed: {e}"))?;
+        let class_name = to_wstring("RustAVTestPlayerWindow");
+        let title_w = to_wstring(title);
 
-    if parse_error {
-        print_usage();
-        std::process::exit(2);
-    }
+        let cursor = LoadCursorW(None, IDC_ARROW).map_err(|e| format!("LoadCursorW failed: {e}"))?;
+        let window_class = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(window_proc),
+            hInstance: instance.into(),
+            lpszClassName: PCWSTR(class_name.as_ptr()),
+            hCursor: cursor,
+            hbrBackground: HBRUSH(0),
+            ..Default::default()
+        };
 
-    let run_result = |case_name: &str, max_secs: Option<f64>, stream_uri_arg: &str| -> i32 {
-        unsafe fn run_case_with_sdl(
-            uris: Vec<String>,
-            loop_players: bool,
-            max_secs: Option<f64>,
-            require_create_success: bool,
-        ) -> i32 {
-            if sdl::SDL_Init((sdl::SDL_INIT_VIDEO | sdl::SDL_INIT_EVENTS) as u32) < 0 {
-                Debug::Log("SDL Failed to initialize");
-                return 1;
-            }
-
-            let started = create_players_and_run(&uris, 640, 400, 30, 60, loop_players, max_secs);
-            sdl::SDL_Quit();
-
-            if started == require_create_success {
-                0
-            } else {
-                1
-            }
+        if RegisterClassW(&window_class) == 0 {
+            return Err("RegisterClassW failed".to_string());
         }
+
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        let _ = AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE(0));
+
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR(title_w.as_ptr()),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            HWND(0),
+            HMENU(0),
+            instance,
+            None,
+        );
+
+        if hwnd.0 == 0 {
+            return Err("CreateWindowExW failed".to_string());
+        }
+
+        ShowWindow(hwnd, SW_SHOW);
+        let _ = UpdateWindow(hwnd);
+        Ok(hwnd)
+    }
+
+    fn update_window_title(hwnd: HWND, viewer_state: &Arc<Mutex<ViewerState>>) {
+        let viewer = viewer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let title = format!(
+            "{} | {}x{} | frame={} | t={:.3}s",
+            viewer.title,
+            viewer.source_width,
+            viewer.source_height,
+            viewer.last_frame_index,
+            viewer.last_time_sec
+        );
+        let title_w = to_wstring(&title);
 
         unsafe {
-            match case_name {
-                "file_loop" => run_case_with_sdl(vec![sample_video_uri()], true, max_secs, true),
-                "file_once" => run_case_with_sdl(vec![sample_video_uri()], false, max_secs, true),
-                "invalid_uri" => run_case_with_sdl(
-                    vec!["invaliduri.invaliduri".to_string()],
-                    false,
-                    max_secs,
-                    false,
-                ),
-                "alloc_stream" | "alloc_rtsp" | "alloc_rtmp" => {
-                    allocation_test(stream_uri_arg);
-                    0
-                }
-                "rtsp_single" => {
-                    run_case_with_sdl(vec![stream_uri_arg.to_string()], false, max_secs, true)
-                }
-                "rtmp_single" => {
-                    run_case_with_sdl(vec![stream_uri_arg.to_string()], false, max_secs, true)
-                }
-                "rtsp_multi" => run_case_with_sdl(
-                    vec![
-                        "rtsp://localhost:554/stream0".to_string(),
-                        "rtsp://localhost:555/stream1".to_string(),
-                        "rtsp://localhost:556/stream2".to_string(),
-                        "rtsp://localhost:557/stream3".to_string(),
-                    ],
-                    false,
-                    max_secs,
-                    true,
-                ),
-                _ => {
-                    print_usage();
-                    2
-                }
-            }
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
+                hwnd,
+                PCWSTR(title_w.as_ptr()),
+            );
         }
-    };
+    }
 
-    unsafe {
-        run_memory_checkpoint();
+    pub fn run() -> Result<(), String> {
+        let config = parse_args()?;
+        let title = format!("RustAV Test Player - {}", config.uri);
+
         Initialize(false);
 
-        let code = run_result(&case, max_seconds, &stream_uri);
+        let (player, shared) =
+            Player::CreateWithFrameExport(config.uri.clone(), config.width, config.height)
+                .ok_or_else(|| format!("创建播放器失败: {}", config.uri))?;
 
-        Teardown();
-
-        dump_memory_checkpoint();
-
-        if code != 0 {
-            std::process::exit(code);
+        if config.loop_player {
+            player.SetLoop(true);
         }
+        player.Play();
+
+        let viewer_state = Arc::new(Mutex::new(ViewerState::new(
+            config.width,
+            config.height,
+            title.clone(),
+        )));
+        let _ = VIEWER_STATE.set(viewer_state.clone());
+
+        let hwnd = unsafe { create_window(&title, config.width, config.height)? };
+        let start = Instant::now();
+        let mut quit = false;
+        let mut last_title_update = Instant::now();
+
+        while !quit {
+            unsafe {
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, HWND(0), 0, 0, PM_REMOVE).into() {
+                    if msg.message == WM_QUIT {
+                        quit = true;
+                        break;
+                    }
+
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+
+            if quit {
+                break;
+            }
+
+            if pull_latest_frame(&shared, &viewer_state) {
+                unsafe {
+                    let _ = InvalidateRect(hwnd, None, false);
+                }
+
+                if last_title_update.elapsed() >= Duration::from_millis(250) {
+                    update_window_title(hwnd, &viewer_state);
+                    last_title_update = Instant::now();
+                }
+            }
+
+            if let Some(max_seconds) = config.max_seconds {
+                if max_seconds > 0.0 && start.elapsed().as_secs_f64() >= max_seconds {
+                    unsafe {
+                        let _ = DestroyWindow(hwnd);
+                    }
+                }
+            }
+
+            thread::sleep(Duration::from_millis(15));
+        }
+
+        drop(player);
+        Teardown();
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn main() {
+    if let Err(error) = win32_player::run() {
+        eprintln!("{error}");
+        std::process::exit(1);
     }
 }

@@ -1,4 +1,4 @@
-name: RustAV Matrix
+name: RustAV CI
 
 on:
   push:
@@ -7,6 +7,8 @@ on:
       - "examples/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "UNITY_MOBILE_BUILD.md"
+      - "UNITY_WIN_IOS_ANDROID_PLAN.md"
       - ".github/workflows/rustav-matrix.yml"
   pull_request:
     paths:
@@ -14,18 +16,32 @@ on:
       - "examples/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "UNITY_MOBILE_BUILD.md"
+      - "UNITY_WIN_IOS_ANDROID_PLAN.md"
       - ".github/workflows/rustav-matrix.yml"
   workflow_dispatch:
 
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
 jobs:
-  validate:
+  windows-validate:
+    name: Windows Library Check
     runs-on: windows-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
 
       - name: Cache vcpkg
         uses: actions/cache@v4
@@ -35,7 +51,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-vcpkg-x64-windows-
 
-      - name: Setup FFmpeg/SDL2 (vcpkg)
+      - name: Setup FFmpeg (vcpkg)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -52,7 +68,7 @@ jobs:
             & "$vcpkgRoot\bootstrap-vcpkg.bat" -disableMetrics
           }
 
-          & "$vcpkgRoot\vcpkg.exe" install "ffmpeg:x64-windows" "sdl2:x64-windows" --disable-metrics
+          & "$vcpkgRoot\vcpkg.exe" install "ffmpeg:x64-windows" --disable-metrics
 
           "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "VCPKG_DEFAULT_TRIPLET=x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -61,13 +77,54 @@ jobs:
           "$vcpkgRoot\installed\x64-windows\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "$vcpkgRoot\installed\x64-windows\tools\ffmpeg" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Cargo Check
-        run: cargo check
+      - name: Cargo Check Library
+        run: cargo check --lib
 
-      - name: Cargo Check Example
-        run: cargo check --example test_player
+  android-build:
+    name: Android arm64 Build
+    runs-on: ubuntu-latest
+    env:
+      CARGO_NDK_PLATFORM: 21
 
-      - name: Run Native-Aligned Matrix (CI)
-        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Install Linux Build Dependencies
         run: |
-          ./examples/run_native_test_matrix.ps1 -Ci -Cases all -SkipRtsp -MaxSeconds 3
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev make perl pkg-config yasm nasm
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build Android arm64 Library
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cargo ndk -t arm64-v8a -o target/android-unity-libs build --release --lib --features mobile-ffmpeg-build
+
+      - name: Upload Android Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustav-android-arm64-v8a
+          path: target/android-unity-libs/arm64-v8a/librustav_native.so
+          if-no-files-found: error

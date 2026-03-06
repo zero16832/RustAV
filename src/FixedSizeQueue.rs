@@ -32,6 +32,10 @@ impl<T> FixedSizeQueue<T> {
         self.queue.lock().unwrap().pop_front()
     }
 
+    pub fn Drain(&self) -> Vec<T> {
+        self.queue.lock().unwrap().drain(..).collect()
+    }
+
     pub fn Flush(&self) {
         self.queue.lock().unwrap().clear();
     }

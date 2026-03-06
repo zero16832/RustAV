@@ -35,7 +35,8 @@ pub struct AVLibPlayer {
 impl AVLibPlayer {
     const RTSP_PREFIX: &'static str = "rtsp://";
     const RTMP_PREFIX: &'static str = "rtmp://";
-    const CONNECT_RETRY_MILLISECONDS: u64 = 2500;
+    const CONNECT_RETRY_MILLISECONDS: u64 = 200;
+    const REALTIME_POLL_MILLISECONDS: u64 = 5;
 
     fn ProcessWideInitialize() {
         PROCESS_WIDE_INIT.call_once(|| {
@@ -59,6 +60,22 @@ impl AVLibPlayer {
             Duration::from_secs_f64((min_frame_duration * 0.5).max(0.001))
         } else {
             Duration::from_micros(50_000)
+        }
+    }
+
+    fn RealtimeSleepTimeFromDecoders(decoders: &[Arc<AVLibDecoder>]) -> Duration {
+        let mut min_frame_duration = f64::MAX;
+        for decoder in decoders.iter() {
+            let d = decoder.GetFrameDuration();
+            if d > 0.0 && d < min_frame_duration {
+                min_frame_duration = d;
+            }
+        }
+
+        if min_frame_duration.is_finite() && min_frame_duration > 0.0 {
+            Duration::from_secs_f64((min_frame_duration * 0.25).clamp(0.001, 0.005))
+        } else {
+            Duration::from_millis(Self::REALTIME_POLL_MILLISECONDS)
         }
     }
 
@@ -213,7 +230,7 @@ impl AVLibPlayer {
                 format: t_target_format,
             };
 
-            let mut sleep_duration = Duration::from_micros(50_000);
+            let mut sleep_duration = Duration::from_millis(Self::REALTIME_POLL_MILLISECONDS);
 
             while t_stay_alive.load(Ordering::SeqCst) {
                 let connected = Self::EnsureConnection(
@@ -261,7 +278,7 @@ impl AVLibPlayer {
                         false
                     };
                     sleep_duration = if is_realtime {
-                        Duration::from_micros(50_000)
+                        Self::RealtimeSleepTimeFromDecoders(&decoders_snapshot)
                     } else {
                         Self::SleepTimeFromDecoders(&decoders_snapshot)
                     };
@@ -360,12 +377,24 @@ impl AVLibPlayer {
     }
 
     pub fn Play(&self) {
-        if !self._playing.load(Ordering::SeqCst) {
+        let was_playing = self._playing.swap(true, Ordering::SeqCst);
+        if !was_playing {
+            if self.IsRealtime() {
+                let decoders = if let Ok(decoders) = self._decoders.lock() {
+                    decoders.clone()
+                } else {
+                    Vec::new()
+                };
+
+                for decoder in decoders.iter() {
+                    decoder.FlushRealtimeFrames();
+                }
+            }
+
             if let Ok(mut last) = self._lastTick.lock() {
                 *last = Instant::now();
             }
         }
-        self._playing.store(true, Ordering::SeqCst);
     }
 
     pub fn Stop(&self) {

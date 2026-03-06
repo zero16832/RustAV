@@ -6,11 +6,12 @@ use crate::FixedSizeQueue::FixedSizeQueue;
 use crate::IAVLibSource::{AVLibStreamInfo, IAVLibSource};
 use crate::Logging::Debug::Debug;
 use ffmpeg_next::codec::{self, packet::Flags as PacketFlags};
-use ffmpeg_next::ffi::{av_mallocz, AVMediaType, AV_INPUT_BUFFER_PADDING_SIZE};
+use ffmpeg_next::ffi::{av_mallocz, AVMediaType, AV_CODEC_FLAG_LOW_DELAY, AV_INPUT_BUFFER_PADDING_SIZE};
 use ffmpeg_next::{Packet, Rational};
 use futures_util::StreamExt;
 use retina::client::{
     PlayOptions, Session, SessionOptions, SetupOptions, TcpTransportOptions, Transport,
+    UdpTransportOptions,
 };
 use retina::codec::{CodecItem, ParametersRef};
 use std::ptr;
@@ -52,6 +53,7 @@ pub struct AVLibRTSPSource {
 }
 
 impl AVLibRTSPSource {
+    const REALTIME_VIDEO_PACKET_QUEUE_SIZE: usize = 3;
     const BEGIN_TIMEOUT_CHECK_SECONDS: u64 = 3;
     const TIMEOUT_SECONDS: u64 = 2;
     const CONNECT_RETRY_DELAY_MS: u64 = 200;
@@ -60,7 +62,9 @@ impl AVLibRTSPSource {
     pub fn new(uri: String) -> Self {
         let _ = ffmpeg_next::init();
 
-        let packet_queues = Arc::new(Mutex::new(vec![Arc::new(FixedSizeQueue::new(20))]));
+        let packet_queues = Arc::new(Mutex::new(vec![Arc::new(FixedSizeQueue::new(
+            Self::REALTIME_VIDEO_PACKET_QUEUE_SIZE,
+        ))]));
         let stream_types = Arc::new(Mutex::new(vec![AVMediaType::AVMEDIA_TYPE_VIDEO]));
         let streams = Arc::new(Mutex::new(vec![AVLibStreamInfo {
             index: 0,
@@ -323,20 +327,55 @@ impl AVLibRTSPSource {
     ) -> Result<(), String> {
         let url = Url::parse(&uri).map_err(|e| format!("invalid RTSP uri {}: {}", uri, e))?;
 
-        let mut described = Session::describe(url, SessionOptions::default())
-            .await
-            .map_err(|e| format!("DESCRIBE failed: {}", e))?;
+        let (described, stream_index) = {
+            let mut udp_described = Session::describe(url.clone(), SessionOptions::default())
+                .await
+                .map_err(|e| format!("DESCRIBE failed: {}", e))?;
 
-        let stream_index = Self::SelectVideoStreamIndex(described.streams())
-            .ok_or_else(|| "no supported video stream (expected h264/h265)".to_string())?;
+            let udp_stream_index = Self::SelectVideoStreamIndex(udp_described.streams())
+                .ok_or_else(|| "no supported video stream (expected h264/h265)".to_string())?;
 
-        described
-            .setup(
-                stream_index,
-                SetupOptions::default().transport(Transport::Tcp(TcpTransportOptions::default())),
-            )
-            .await
-            .map_err(|e| format!("SETUP failed: {}", e))?;
+            match udp_described
+                .setup(
+                    udp_stream_index,
+                    SetupOptions::default().transport(Transport::Udp(UdpTransportOptions::default())),
+                )
+                .await
+            {
+                Ok(_) => {
+                    Debug::Log("AVLibRTSPSource::RunRetinaLoop - transport=udp");
+                    (udp_described, udp_stream_index)
+                }
+                Err(udp_err) => {
+                    Debug::LogWarning(&format!(
+                        "AVLibRTSPSource::RunRetinaLoop - UDP setup failed, fallback to TCP: {}",
+                        udp_err
+                    ));
+
+                    let mut tcp_described =
+                        Session::describe(url.clone(), SessionOptions::default())
+                            .await
+                            .map_err(|e| format!("DESCRIBE failed: {}", e))?;
+
+                    let tcp_stream_index = Self::SelectVideoStreamIndex(tcp_described.streams())
+                        .ok_or_else(|| {
+                            "no supported video stream (expected h264/h265)".to_string()
+                        })?;
+
+                    tcp_described
+                        .setup(
+                            tcp_stream_index,
+                            SetupOptions::default()
+                                .transport(Transport::Tcp(TcpTransportOptions::default())),
+                        )
+                        .await
+                        .map_err(|e| format!("SETUP failed: {}", e))?;
+
+                    Debug::Log("AVLibRTSPSource::RunRetinaLoop - transport=tcp");
+                    (tcp_described, tcp_stream_index)
+                }
+            }
+        };
 
         let mut demuxed = described
             .play(PlayOptions::default())
@@ -443,6 +482,8 @@ impl AVLibRTSPSource {
             (*ctx).codec_id = config.codec_id.into();
             (*ctx).width = config.width;
             (*ctx).height = config.height;
+            (*ctx).thread_count = 1;
+            (*ctx).flags |= AV_CODEC_FLAG_LOW_DELAY as i32;
 
             if !config.extra_data.is_empty() {
                 let extra_data_size = config.extra_data.len();

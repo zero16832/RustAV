@@ -7,7 +7,7 @@ use crate::IAVLibSource::{AVLibStreamInfo, IAVLibSource};
 use crate::Logging::Debug::Debug;
 use bytes::Bytes;
 use ffmpeg_next::codec::{self, packet::Flags as PacketFlags};
-use ffmpeg_next::ffi::{av_mallocz, AVMediaType, AV_INPUT_BUFFER_PADDING_SIZE};
+use ffmpeg_next::ffi::{av_mallocz, AVMediaType, AV_CODEC_FLAG_LOW_DELAY, AV_INPUT_BUFFER_PADDING_SIZE};
 use ffmpeg_next::{Packet, Rational};
 use rml_rtmp::chunk_io::Packet as RtmpPacket;
 use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
@@ -63,6 +63,7 @@ pub struct AVLibRTMPSource {
 }
 
 impl AVLibRTMPSource {
+    const REALTIME_VIDEO_PACKET_QUEUE_SIZE: usize = 3;
     const BEGIN_TIMEOUT_CHECK_SECONDS: u64 = 3;
     const TIMEOUT_SECONDS: u64 = 2;
     const CONNECT_RETRY_DELAY_MS: u64 = 200;
@@ -74,7 +75,9 @@ impl AVLibRTMPSource {
     pub fn new(uri: String) -> Self {
         let _ = ffmpeg_next::init();
 
-        let packet_queues = Arc::new(Mutex::new(vec![Arc::new(FixedSizeQueue::new(20))]));
+        let packet_queues = Arc::new(Mutex::new(vec![Arc::new(FixedSizeQueue::new(
+            Self::REALTIME_VIDEO_PACKET_QUEUE_SIZE,
+        ))]));
         let stream_types = Arc::new(Mutex::new(vec![AVMediaType::AVMEDIA_TYPE_VIDEO]));
         let streams = Arc::new(Mutex::new(vec![AVLibStreamInfo {
             index: 0,
@@ -751,6 +754,8 @@ impl AVLibRTMPSource {
             (*ctx).codec_id = config.codec_id.into();
             (*ctx).width = config.width;
             (*ctx).height = config.height;
+            (*ctx).thread_count = 1;
+            (*ctx).flags |= AV_CODEC_FLAG_LOW_DELAY as i32;
 
             if !config.extra_data.is_empty() {
                 let extra_data_size = config.extra_data.len();

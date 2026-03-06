@@ -3,13 +3,13 @@
 use crate::IVideoClient::IVideoClient;
 use crate::IVideoDescription::IVideoDescription;
 use crate::PixelFormat::PixelFormat;
-use crate::Rendering::D3D11TextureWriter::D3D11TextureWriter;
 use crate::Rendering::NullTextureWriter::NullTextureWriter;
-use crate::Rendering::SDLWindowWriter::SDLWindowWriter;
 use crate::Rendering::TextureWriter::{TextureWriter, TextureWriterLike};
-use crate::SDLWindow::SDLWindow;
 use crate::VideoFrame::VideoFrame;
 use std::os::raw::c_void;
+
+#[cfg(windows)]
+use crate::Rendering::D3D11TextureWriter::D3D11TextureWriter;
 
 pub struct TextureClient {
     _writer: Box<dyn TextureWriterLike>,
@@ -27,12 +27,7 @@ impl TextureClient {
         }
     }
 
-    pub fn from_sdl_window(window: &SDLWindow) -> Self {
-        Self {
-            _writer: Box::new(SDLWindowWriter::new(window)),
-        }
-    }
-
+    #[cfg(windows)]
     pub fn from_d3d11_writer(writer: D3D11TextureWriter) -> Self {
         Self {
             _writer: Box::new(writer),

@@ -2,6 +2,7 @@
 #![allow(non_camel_case_types)]
 
 use crate::AVLibPlayer::AVLibPlayer;
+use crate::FrameExportClient::{FrameExportClient, SharedExportedFrameState};
 use crate::IVideoClient::IVideoClient;
 use crate::Logging::Debug::Debug;
 use crate::PixelFormat::PixelFormat;
@@ -49,6 +50,25 @@ impl Player {
     pub fn CreateWithTexture(uri: String, target_texture: *mut c_void) -> Option<Self> {
         let client = TextureClient::new(target_texture)?;
         Self::Create(uri, Box::new(client))
+    }
+
+    pub fn CreateWithFrameExport(
+        uri: String,
+        target_width: i32,
+        target_height: i32,
+    ) -> Option<(Self, SharedExportedFrameState)> {
+        if target_width <= 0 || target_height <= 0 {
+            Debug::LogError("Player::CreateWithFrameExport - target size must be positive");
+            return None;
+        }
+
+        let (client, shared) = FrameExportClient::new(
+            target_width,
+            target_height,
+            PixelFormat::PIXEL_FORMAT_RGBA32,
+        );
+        let player = Self::Create(uri, Box::new(client))?;
+        Some((player, shared))
     }
 
     pub fn Write(&mut self) {

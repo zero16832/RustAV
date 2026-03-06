@@ -19,6 +19,7 @@ pub struct AVLibVideoDecoder {
     pub _parsedFrames: Arc<FixedSizeQueue<VideoFrame>>,
     _readyFrames: Arc<FixedSizeQueue<VideoFrame>>,
     _isRealtime: bool,
+    _resumeThreshold: usize,
     _stayAlive: Arc<AtomicBool>,
     _thread: Option<thread::JoinHandle<()>>,
     _lastFrame: Arc<Mutex<Option<VideoFrame>>>,
@@ -30,7 +31,8 @@ pub struct AVLibVideoDecoder {
 
 impl AVLibVideoDecoder {
     const DEFAULT_VIDEO_FRAME_QUEUE_SIZE: usize = 25;
-    const COMPLETE_FRAMES_QUEUE_THRESHOLD: usize = Self::DEFAULT_VIDEO_FRAME_QUEUE_SIZE / 2;
+    const REALTIME_VIDEO_FRAME_QUEUE_SIZE: usize = 3;
+    const REALTIME_RESUME_THRESHOLD: usize = 1;
 
     pub fn new(
         source: Arc<Mutex<Box<dyn IAVLibSource + Send>>>,
@@ -39,8 +41,23 @@ impl AVLibVideoDecoder {
         mut decoder: ffmpeg_next::decoder::Video,
         tb: f64,
     ) -> Self {
-        let parsed = Arc::new(FixedSizeQueue::new(Self::DEFAULT_VIDEO_FRAME_QUEUE_SIZE));
-        let ready = Arc::new(FixedSizeQueue::new(Self::DEFAULT_VIDEO_FRAME_QUEUE_SIZE));
+        let is_realtime = if let Ok(s) = source.lock() {
+            s.IsRealtime()
+        } else {
+            false
+        };
+        let frame_queue_size = if is_realtime {
+            Self::REALTIME_VIDEO_FRAME_QUEUE_SIZE
+        } else {
+            Self::DEFAULT_VIDEO_FRAME_QUEUE_SIZE
+        };
+        let resume_threshold = if is_realtime {
+            Self::REALTIME_RESUME_THRESHOLD
+        } else {
+            frame_queue_size / 2
+        };
+        let parsed = Arc::new(FixedSizeQueue::new(frame_queue_size));
+        let ready = Arc::new(FixedSizeQueue::new(frame_queue_size));
         let stay_alive = Arc::new(AtomicBool::new(true));
         let seek_request = Arc::new(AtomicBool::new(true));
         let seek_request_time = Arc::new(Mutex::new(0.0));
@@ -51,17 +68,13 @@ impl AVLibVideoDecoder {
         let target_height = target_desc.Height() as u32;
         let target_format = target_desc.Format();
         let target_pixel = PixelFormatToFFmpeg(target_format);
-        let is_realtime = if let Ok(s) = source.lock() {
-            s.IsRealtime()
-        } else {
-            false
-        };
 
         let mut obj = Self {
             _source: source.clone(),
             _parsedFrames: parsed.clone(),
             _readyFrames: ready.clone(),
             _isRealtime: is_realtime,
+            _resumeThreshold: resume_threshold,
             _stayAlive: stay_alive.clone(),
             _thread: None,
             _lastFrame: last_frame.clone(),
@@ -341,8 +354,33 @@ impl AVLibVideoDecoder {
         self._readyFrames.Push(frame);
     }
 
+    pub fn FlushRealtimeFrames(&self) {
+        if !self._isRealtime {
+            return;
+        }
+
+        let drained = self._parsedFrames.Drain();
+        for frame in drained {
+            self.Recycle(frame);
+        }
+
+        let last_frame = {
+            let mut last = match self._lastFrame.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            last.take()
+        };
+
+        if let Some(frame) = last_frame {
+            self.Recycle(frame);
+        }
+
+        self._continueCondition.notify_all();
+    }
+
     pub fn TryGetNext(&self, time: f64) -> Option<VideoFrame> {
-        if self._parsedFrames.Count() <= Self::COMPLETE_FRAMES_QUEUE_THRESHOLD {
+        if self._parsedFrames.Count() <= self._resumeThreshold {
             self._continueCondition.notify_all();
         }
 
@@ -353,7 +391,19 @@ impl AVLibVideoDecoder {
         };
 
         if realtime_now {
-            return self._parsedFrames.TryPop();
+            let mut drained = self._parsedFrames.Drain();
+            if drained.is_empty() {
+                return None;
+            }
+
+            self._continueCondition.notify_all();
+
+            let latest = drained.pop();
+            for stale in drained {
+                self.Recycle(stale);
+            }
+
+            return latest;
         }
 
         let seek_requested = !self._seekRequest.swap(true, Ordering::SeqCst);

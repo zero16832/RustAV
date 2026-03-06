@@ -118,6 +118,12 @@ impl AVLibDecoder {
         }
     }
 
+    pub fn FlushRealtimeFrames(&self) {
+        if let Ok(decoder) = self._decoder.lock() {
+            decoder.FlushRealtimeFrames();
+        }
+    }
+
     pub fn GetTimeBase(&self) -> f64 {
         self._timeBase
     }

@@ -1,11 +1,14 @@
 #![allow(non_snake_case)]
 use crate::dllmain::{UnityInterfacesReady, UnityRenderer};
 use crate::PixelFormat::PixelFormat;
-use crate::Rendering::D3D11TextureWriter::D3D11TextureWriter;
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+#[cfg(windows)]
+use crate::Rendering::D3D11TextureWriter::D3D11TextureWriter;
+
+#[cfg(windows)]
 const K_UNITY_GFX_RENDERER_D3D11: i32 = 2;
 
 pub trait TextureWriterLike: Send {
@@ -38,12 +41,19 @@ impl TextureWriter {
             return None;
         }
 
+        #[cfg(windows)]
         match UnityRenderer() {
             K_UNITY_GFX_RENDERER_D3D11 => unsafe {
                 D3D11TextureWriter::new(target_texture)
                     .map(|w| Box::new(w) as Box<dyn TextureWriterLike>)
             },
             _ => None,
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = target_texture;
+            None
         }
     }
 

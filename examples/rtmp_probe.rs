@@ -79,13 +79,23 @@ fn main() {
     player.Play();
     let start = Instant::now();
     let mut last_print = Instant::now();
+    let mut first_frame_elapsed: Option<f64> = None;
 
     while start.elapsed().as_secs_f64() < run_seconds {
         player.Write();
         thread::sleep(Duration::from_millis(20));
 
+        let count = frames.load(Ordering::Relaxed);
+        if first_frame_elapsed.is_none() && count > 0 {
+            first_frame_elapsed = Some(start.elapsed().as_secs_f64());
+            println!(
+                "[rtmp_probe] first_frame={:.3}s frames={}",
+                first_frame_elapsed.unwrap(),
+                count
+            );
+        }
+
         if last_print.elapsed().as_secs_f64() >= 1.0 {
-            let count = frames.load(Ordering::Relaxed);
             println!(
                 "[rtmp_probe] elapsed={:.2}s frames={}",
                 start.elapsed().as_secs_f64(),
@@ -100,6 +110,9 @@ fn main() {
         "[rtmp_probe] done uri={} seconds={:.2} frames={}",
         uri, run_seconds, frame_count
     );
+    if let Some(first_frame) = first_frame_elapsed {
+        println!("[rtmp_probe] first_frame_final={:.3}s", first_frame);
+    }
 
     if frame_count == 0 {
         eprintln!("[FAIL] no frame received");
