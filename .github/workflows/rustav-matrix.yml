@@ -10,6 +10,7 @@ on:
       - "Cargo.lock"
       - "UNITY_MOBILE_BUILD.md"
       - "UNITY_PLUGIN_ABI.md"
+      - "UNITY_PLUGIN_PACKAGE_LAYOUT.md"
       - "UNITY_WIN_IOS_ANDROID_PLAN.md"
       - ".github/workflows/rustav-matrix.yml"
   pull_request:
@@ -21,6 +22,7 @@ on:
       - "Cargo.lock"
       - "UNITY_MOBILE_BUILD.md"
       - "UNITY_PLUGIN_ABI.md"
+      - "UNITY_PLUGIN_PACKAGE_LAYOUT.md"
       - "UNITY_WIN_IOS_ANDROID_PLAN.md"
       - ".github/workflows/rustav-matrix.yml"
   workflow_dispatch:
@@ -32,7 +34,6 @@ env:
 jobs:
   windows-validate:
     name: Windows Library Check
-    if: false
     runs-on: windows-latest
 
     steps:
@@ -82,12 +83,44 @@ jobs:
           "$vcpkgRoot\installed\x64-windows\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "$vcpkgRoot\installed\x64-windows\tools\ffmpeg" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Cargo Check Library
-        run: cargo check --lib
+      - name: Build Windows Library
+        run: cargo build --release --lib --locked
+
+      - name: Stage Windows Unity Plugin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $packageRoot = Join-Path $env:GITHUB_WORKSPACE "target\unity-package\windows\Assets\Plugins\x86_64"
+          New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
+
+          Copy-Item -LiteralPath "target\release\rustav_native.dll" -Destination $packageRoot -Force
+
+          $runtimeDlls = Get-ChildItem -Path "$env:GITHUB_WORKSPACE\.vcpkg\installed\x64-windows\bin\*.dll" | Sort-Object Name
+          foreach ($dll in $runtimeDlls) {
+            Copy-Item -LiteralPath $dll.FullName -Destination $packageRoot -Force
+          }
+
+          $dependencyFile = Join-Path $packageRoot "DEPENDENCIES.txt"
+          @(
+            "Windows Unity 插件目录：Assets/Plugins/x86_64",
+            "",
+            "运行时文件：",
+            "  - rustav_native.dll"
+          ) | Set-Content -Path $dependencyFile -Encoding utf8
+
+          foreach ($dll in $runtimeDlls) {
+            Add-Content -Path $dependencyFile -Value ("  - " + $dll.Name) -Encoding utf8
+          }
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustav-windows-x86_64-unity-plugin
+          path: target/unity-package/windows
+          if-no-files-found: error
 
   android-build:
     name: Android arm64 Build
-    if: false
     runs-on: ubuntu-latest
     env:
       CARGO_NDK_PLATFORM: 21
@@ -168,11 +201,26 @@ jobs:
         run: |
           cargo ndk -t arm64-v8a -o target/android-unity-libs build --release --lib --locked --features mobile-ffmpeg-build
 
+      - name: Stage Android Unity Plugin
+        run: |
+          package_dir="target/unity-package/android/Assets/Plugins/Android/arm64-v8a"
+          mkdir -p "$package_dir"
+          cp target/android-unity-libs/arm64-v8a/librustav_native.so "$package_dir/"
+          cat > "$package_dir/DEPENDENCIES.txt" <<'EOF'
+          Android Unity 插件目录：Assets/Plugins/Android/arm64-v8a
+
+          运行时文件：
+            - librustav_native.so
+
+          额外运行时依赖：
+            - 无；FFmpeg 已静态链接进 librustav_native.so
+          EOF
+
       - name: Upload Android Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rustav-android-arm64-v8a
-          path: target/android-unity-libs/arm64-v8a/librustav_native.so
+          name: rustav-android-arm64-v8a-unity-plugin
+          path: target/unity-package/android
           if-no-files-found: error
 
   ios-build:
@@ -251,13 +299,32 @@ jobs:
         run: |
           xcodebuild -version
 
+      - name: Patch RustAV crate types for iOS
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import pathlib
+          import sys
+
+          path = pathlib.Path("Cargo.toml")
+          text = path.read_text(encoding="utf-8")
+          old = 'crate-type = ["cdylib", "rlib", "staticlib"]'
+          new = 'crate-type = ["staticlib", "rlib"]'
+          if old not in text:
+              print("expected crate-type declaration not found", file=sys.stderr)
+              sys.exit(1)
+
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          print("patched Cargo.toml for iOS static library build")
+          PY
+
       - name: Build iOS Device Library
         run: |
-          cargo rustc --release --lib --locked --target aarch64-apple-ios --features mobile-ffmpeg-build -- --crate-type staticlib
+          cargo build --release --lib --locked --target aarch64-apple-ios --features mobile-ffmpeg-build
 
       - name: Build iOS Simulator Library
         run: |
-          cargo rustc --release --lib --locked --target aarch64-apple-ios-sim --features mobile-ffmpeg-build -- --crate-type staticlib
+          cargo build --release --lib --locked --target aarch64-apple-ios-sim --features mobile-ffmpeg-build
 
       - name: Package iOS XCFramework
         run: |
@@ -267,9 +334,82 @@ jobs:
             -library target/aarch64-apple-ios-sim/release/librustav_native.a -headers include \
             -output target/apple-unity/RustAV.xcframework
 
+      - name: Stage iOS Unity Plugin
+        run: |
+          unity_dir="target/unity-package/ios/Assets/Plugins/iOS"
+          support_dir="target/unity-package/ios/BuildSupport/iOS"
+          mkdir -p "$unity_dir" "$support_dir"
+
+          cp target/aarch64-apple-ios/release/librustav_native.a "$unity_dir/"
+          cp include/RustAV.h "$unity_dir/"
+          cp -R target/apple-unity/RustAV.xcframework "$support_dir/"
+
+          cat > "$unity_dir/DEPENDENCIES.txt" <<'EOF'
+          iOS Unity 插件目录：Assets/Plugins/iOS
+
+          自动集成文件：
+            - librustav_native.a
+            - RustAV.h
+
+          额外运行时依赖：
+            - 无；FFmpeg 已静态链接进静态库
+
+          附加构建支持：
+            - BuildSupport/iOS/RustAV.xcframework
+          EOF
+
       - name: Upload iOS Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rustav-ios-xcframework
-          path: target/apple-unity/RustAV.xcframework
+          name: rustav-ios-unity-plugin
+          path: target/unity-package/ios
+          if-no-files-found: error
+
+  unity-plugins-package:
+    name: Package Unity Plugins Bundle
+    needs:
+      - windows-validate
+      - android-build
+      - ios-build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rustav-windows-x86_64-unity-plugin
+          path: artifacts/windows
+
+      - name: Download Android Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rustav-android-arm64-v8a-unity-plugin
+          path: artifacts/android
+
+      - name: Download iOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rustav-ios-unity-plugin
+          path: artifacts/ios
+
+      - name: Assemble Unity Plugins Bundle
+        run: |
+          mkdir -p UnityPlugins
+          cp -R artifacts/windows/. UnityPlugins/
+          cp -R artifacts/android/. UnityPlugins/
+          cp -R artifacts/ios/. UnityPlugins/
+          cp UNITY_PLUGIN_PACKAGE_LAYOUT.md UnityPlugins/README.md
+
+      - name: Archive Unity Plugins Bundle
+        run: |
+          zip -r RustAV-UnityPlugins.zip UnityPlugins
+
+      - name: Upload Unity Plugins Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustav-unity-plugins-bundle
+          path: RustAV-UnityPlugins.zip
           if-no-files-found: error

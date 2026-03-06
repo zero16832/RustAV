@@ -96,4 +96,11 @@ Windows 专属接口：
    - Windows：`rust-cache + vcpkg cache`
    - Android：`rust-cache`
    - iOS：`rust-cache`
-5. 当前为了集中收敛 iOS 问题，GitHub Actions 已临时暂停 Windows / Android job，仅保留 iOS job 运行。
+5. GitHub Actions 当前目标已调整为：
+   - Windows：构建 DLL，并打包依赖 DLL
+   - Android：构建 `arm64-v8a` `.so`
+   - iOS：构建设备静态库、simulator 静态库，并额外打包 `xcframework`
+6. 最终会额外生成一个统一下载产物：
+   `RustAV-UnityPlugins.zip`
+7. 统一包布局说明见：
+   `UNITY_PLUGIN_PACKAGE_LAYOUT.md`
