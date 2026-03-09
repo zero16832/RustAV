@@ -6,7 +6,6 @@ on:
       - main
       - master
     paths:
-      - '.github/workflows/unity-release.yml'
       - 'scripts/**'
       - 'include/**'
       - 'TestFiles/**'
@@ -397,6 +396,7 @@ jobs:
 
   unity-build:
     name: Build Unity Player (${{ matrix.label }})
+    if: ${{ vars.RUSTAV_ENABLE_UNITY_BUILD == 'true' }}
     runs-on: ubuntu-latest
     needs:
       - version
@@ -492,6 +492,13 @@ jobs:
   release:
     name: Publish Release
     runs-on: ubuntu-latest
+    if: >-
+      ${{
+        always() &&
+        needs.version.result == 'success' &&
+        needs.plugin-bundle.result == 'success' &&
+        (needs.unity-build.result == 'success' || needs.unity-build.result == 'skipped')
+      }}
     needs:
       - version
       - plugin-bundle
@@ -534,9 +541,19 @@ jobs:
           Automated release artifacts:
 
           - RustAV Unity plugin bundle
+          EOF
+          if [ "${{ vars.RUSTAV_ENABLE_UNITY_BUILD }}" = "true" ]; then
+            cat >> release-notes.md <<EOF
           - Unity Windows sample player
           - Unity Android sample player
           - Unity iOS Xcode project
+          EOF
+          else
+            cat >> release-notes.md <<EOF
+          - Unity sample player build is disabled in this run
+          EOF
+          fi
+          cat >> release-notes.md <<EOF
 
           Build manifest:
 
