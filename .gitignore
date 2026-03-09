@@ -1,5 +1,12 @@
 /target
 /artifacts/
+/.vcpkg/
+/.ci-tools/
+/UnityPlugins/
+/RustAV-UnityPlugins.zip
+/RustAV-UnityPlugins-v*.zip
+/release-assets/
+/flat-release-assets/
 /_tmp_ios_manifest_test/
 /ios-staticlib/target/
 /scripts/ci/__pycache__/
@@ -16,9 +23,13 @@ write_supplemental_logic.py
 /UnityAVExample/[Oo]bj/
 /UnityAVExample/[Bb]uild/
 /UnityAVExample/[Bb]uilds/
+/UnityAVExample/BuildSupport/
 /UnityAVExample/[Ll]ogs/
 /UnityAVExample/[Uu]ser[Ss]ettings/
 /UnityAVExample/*.csproj
 /UnityAVExample/*.sln
 /UnityAVExample/*.user
 /UnityAVExample/*.userprefs
+/UnityAVExample/Assets/Plugins/x86_64.meta
+/UnityAVExample/Assets/Plugins/x86_64/
+/UnityAVExample/Assets/StreamingAssets/*.mp4

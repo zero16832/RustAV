@@ -128,6 +128,21 @@ function Sync-UnityPlugins {
     }
 
     Get-ChildItem -Path $pluginsDst -Recurse -Filter "DEPENDENCIES.txt" -File | Remove-Item -Force
+
+    $sampleMediaSrc = Join-Path $RustRoot "TestFiles\SampleVideo_1280x720_10mb.mp4"
+    if (-not (Test-Path $sampleMediaSrc)) {
+        throw "[unity-qa] sample media not found: $sampleMediaSrc"
+    }
+
+    $streamingAssetsDir = Join-Path $UnityProject "Assets\StreamingAssets"
+    if (-not (Test-Path $streamingAssetsDir)) {
+        New-Item -ItemType Directory -Force -Path $streamingAssetsDir | Out-Null
+    }
+
+    Copy-Item `
+        -Path $sampleMediaSrc `
+        -Destination (Join-Path $streamingAssetsDir "SampleVideo_1280x720_10mb.mp4") `
+        -Force
 }
 
 function Invoke-ValidationPlayer {

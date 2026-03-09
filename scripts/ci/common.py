@@ -13,6 +13,10 @@ UNITY_MANAGED_RUNTIME_PATHS = (
     "Runtime.meta",
 )
 
+UNITY_SAMPLE_MEDIA_FILES = (
+    "SampleVideo_1280x720_10mb.mp4",
+)
+
 
 def resolve_path(project_root: pathlib.Path, value: str) -> pathlib.Path:
     path = pathlib.Path(value)
@@ -79,6 +83,18 @@ def copy_unity_managed_runtime(project_root: pathlib.Path, output_root: pathlib.
             replace_tree(source_path, destination_path)
         else:
             copy_file(source_path, destination_path)
+
+
+def sync_unity_sample_media(project_root: pathlib.Path, unity_project: pathlib.Path) -> None:
+    source_root = project_root / "TestFiles"
+    destination_root = unity_project / "Assets" / "StreamingAssets"
+    ensure_directory(destination_root)
+
+    for file_name in UNITY_SAMPLE_MEDIA_FILES:
+        source_path = source_root / file_name
+        if not source_path.exists():
+            raise FileNotFoundError(f"Unity 样例媒体不存在: {source_path}")
+        copy_file(source_path, destination_root / file_name)
 
 
 def write_lines(path: pathlib.Path, lines: list[str]) -> None:

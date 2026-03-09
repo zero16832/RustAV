@@ -7,6 +7,7 @@ import pathlib
 import shutil
 
 from common import ensure_directory, replace_tree, resolve_path
+from common import sync_unity_sample_media
 
 PRESERVED_PLUGIN_NAMES = set()
 
@@ -96,12 +97,15 @@ def main() -> int:
             else:
                 shutil.copy2(item, target)
 
+    sync_unity_sample_media(project_root, unity_project)
+
     print(f"[unity-sync] unity_project={unity_project}")
     print(f"[unity-sync] plugins_root={plugins_root}")
     if managed_runtime_root and managed_runtime_root.exists():
         print(f"[unity-sync] managed_runtime_root={managed_runtime_root}")
     if build_support_root and build_support_root.exists():
         print(f"[unity-sync] build_support_root={build_support_root}")
+    print(f"[unity-sync] sample_media_root={project_root / 'TestFiles'}")
     return 0
 
 
