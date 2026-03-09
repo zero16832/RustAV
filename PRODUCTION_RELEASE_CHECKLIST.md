@@ -6,11 +6,13 @@
 
 ## 必过项
 
-1. `cargo check --manifest-path Cargo.toml --lib --examples --locked`
-2. `cargo test --manifest-path Cargo.toml --lib --tests --locked`
-3. `cargo check --manifest-path ios-staticlib/Cargo.toml --lib --locked`
-4. `python scripts/ci/validate_ci_entrypoints.py`
-5. `powershell -ExecutionPolicy Bypass -File scripts/qa/run_production_gate.ps1`
+默认假设公开仓与私有 `RustAV-Core` 同级放置。
+
+1. `cargo check --manifest-path ../RustAV-Core/Cargo.toml --lib --examples --locked`
+2. `cargo test --manifest-path ../RustAV-Core/Cargo.toml --lib --tests --locked`
+3. `cargo check --manifest-path ../RustAV-Core/ios-staticlib/Cargo.toml --lib --locked`
+4. `python scripts/ci/validate_ci_entrypoints.py --public-root . --core-root ../RustAV-Core`
+5. `powershell -ExecutionPolicy Bypass -File scripts/qa/run_production_gate.ps1 -ProjectRoot . -CoreRoot ../RustAV-Core`
 6. 若提供实时 AV 地址，`run_production_gate.ps1` 还应带上 `-RtspAvUri/-RtmpAvUri` 跑满 `run_av_soak.ps1`
 7. 若提供 Unity 实时 AV 地址，`run_production_gate.ps1` 还应带上 `-UnityRtspUri/-UnityRtmpUri -UnitySeconds 600 -UnityAvSyncThresholdMs 200 -UnityAvSyncWarmupSampleCount 5`
 

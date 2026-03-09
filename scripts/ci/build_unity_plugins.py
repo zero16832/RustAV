@@ -20,7 +20,8 @@ def main() -> int:
         choices=["windows", "android", "ios", "package", "all"],
         required=True,
     )
-    parser.add_argument("--project-root", default=".")
+    parser.add_argument("--public-root", default=".")
+    parser.add_argument("--core-root", default=".")
     parser.add_argument("--output-root")
     parser.add_argument("--cargo-ndk-output", default="target/android-unity-libs")
     parser.add_argument("--abi", default="arm64-v8a")
@@ -37,7 +38,8 @@ def main() -> int:
     args = parser.parse_args()
 
     script_dir = pathlib.Path(__file__).resolve().parent
-    project_root = pathlib.Path(args.project_root).resolve()
+    public_root = pathlib.Path(args.public_root).resolve()
+    core_root = pathlib.Path(args.core_root).resolve()
 
     commands: list[list[str]] = []
 
@@ -46,8 +48,10 @@ def main() -> int:
             [
                 sys.executable,
                 str(script_path(script_dir, "build_windows_unity_plugin.py")),
-                "--project-root",
-                str(project_root),
+                "--public-root",
+                str(public_root),
+                "--core-root",
+                str(core_root),
                 "--output-root",
                 args.output_root or "target/unity-package/windows",
                 "--configuration",
@@ -61,8 +65,10 @@ def main() -> int:
             [
                 sys.executable,
                 str(script_path(script_dir, "build_android_unity_plugin.py")),
-                "--project-root",
-                str(project_root),
+                "--public-root",
+                str(public_root),
+                "--core-root",
+                str(core_root),
                 "--output-root",
                 args.output_root or "target/unity-package/android",
                 "--cargo-ndk-output",
@@ -78,8 +84,10 @@ def main() -> int:
             [
                 sys.executable,
                 str(script_path(script_dir, "build_ios_unity_plugin.py")),
-                "--project-root",
-                str(project_root),
+                "--public-root",
+                str(public_root),
+                "--core-root",
+                str(core_root),
                 "--manifest-path",
                 args.manifest_path,
                 "--target-dir",
@@ -97,8 +105,8 @@ def main() -> int:
             [
                 sys.executable,
                 str(script_path(script_dir, "assemble_unity_plugins_bundle.py")),
-                "--project-root",
-                str(project_root),
+                "--public-root",
+                str(public_root),
                 "--windows-artifact",
                 args.windows_artifact,
                 "--android-artifact",
@@ -114,7 +122,7 @@ def main() -> int:
         )
 
     for cmd in commands:
-        run(cmd, cwd=project_root, prefix="unity-build", dry_run=False)
+        run(cmd, cwd=public_root, prefix="unity-build", dry_run=args.dry_run)
 
     return 0
 

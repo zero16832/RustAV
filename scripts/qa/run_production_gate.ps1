@@ -1,9 +1,11 @@
 param(
     [string]$ProjectRoot = "D:\TestProject\Video\RustAV",
 
+    [string]$CoreRoot = "",
+
     [string]$LogDir = "artifacts\production-gate",
 
-    [string]$SampleUri = "../RustAV/TestFiles/SampleVideo_1280x720_10mb.mp4",
+    [string]$SampleUri = "TestFiles\SampleVideo_1280x720_10mb.mp4",
 
     [int]$SampleSeconds = 2,
 
@@ -85,6 +87,21 @@ function Get-AbsoluteLogPath {
 }
 
 $resolvedRoot = (Resolve-Path $ProjectRoot).Path
+if ([string]::IsNullOrWhiteSpace($CoreRoot)) {
+    $coreRootCandidate = Join-Path $resolvedRoot "..\\RustAV-Core"
+    if (Test-Path $coreRootCandidate) {
+        $resolvedCoreRoot = (Resolve-Path $coreRootCandidate).Path
+    } else {
+        $resolvedCoreRoot = $resolvedRoot
+    }
+} else {
+    $resolvedCoreRoot = (Resolve-Path $CoreRoot).Path
+}
+
+$resolvedSampleUri = $SampleUri
+if (-not [System.IO.Path]::IsPathRooted($resolvedSampleUri)) {
+    $resolvedSampleUri = Join-Path $resolvedRoot $resolvedSampleUri
+}
 Set-Location $resolvedRoot
 
 $resolvedLogDir = Get-AbsoluteLogPath -Root $resolvedRoot -RelativePath $LogDir
@@ -94,31 +111,31 @@ $summary = New-Object System.Collections.Generic.List[string]
 
 $null = Invoke-Step `
     -Name "cargo-check" `
-    -Command "cargo check --manifest-path Cargo.toml --lib --examples --locked" `
+    -Command "cargo check --manifest-path `"$resolvedCoreRoot\Cargo.toml`" --lib --examples --locked" `
     -LogPath (Join-Path $resolvedLogDir "cargo-check.log")
 $summary.Add("cargo-check=ok")
 
 $null = Invoke-Step `
     -Name "cargo-test" `
-    -Command "cargo test --manifest-path Cargo.toml --lib --tests --locked" `
+    -Command "cargo test --manifest-path `"$resolvedCoreRoot\Cargo.toml`" --lib --tests --locked" `
     -LogPath (Join-Path $resolvedLogDir "cargo-test.log")
 $summary.Add("cargo-test=ok")
 
 $null = Invoke-Step `
     -Name "ios-staticlib-check" `
-    -Command "cargo check --manifest-path ios-staticlib/Cargo.toml --lib --locked" `
+    -Command "cargo check --manifest-path `"$resolvedCoreRoot\ios-staticlib\Cargo.toml`" --lib --locked" `
     -LogPath (Join-Path $resolvedLogDir "ios-staticlib-check.log")
 $summary.Add("ios-staticlib-check=ok")
 
 $null = Invoke-Step `
     -Name "ci-entrypoints" `
-    -Command "python scripts/ci/validate_ci_entrypoints.py" `
+    -Command "python scripts/ci/validate_ci_entrypoints.py --public-root `"$resolvedRoot`" --core-root `"$resolvedCoreRoot`"" `
     -LogPath (Join-Path $resolvedLogDir "ci-entrypoints.log")
 $summary.Add("ci-entrypoints=ok")
 
 $audioOutput = Invoke-Step `
     -Name "audio-probe" `
-    -Command "cargo run --manifest-path Cargo.toml --example audio_probe -- `"$SampleUri`" $SampleSeconds" `
+    -Command "cargo run --manifest-path `"$resolvedCoreRoot\Cargo.toml`" --example audio_probe -- `"$resolvedSampleUri`" $SampleSeconds" `
     -LogPath (Join-Path $resolvedLogDir "audio-probe.log")
 $summary.Add("audio-probe=ok")
 
@@ -131,7 +148,7 @@ $hasRealtimeUris = -not [string]::IsNullOrWhiteSpace($RtspUri) -and -not [string
 if ($hasRealtimeUris) {
     $null = Invoke-Step `
         -Name "realtime-probes" `
-        -Command "powershell -ExecutionPolicy Bypass -File scripts/qa/run_realtime_probes.ps1 -RtspUri `"$RtspUri`" -RtmpUri `"$RtmpUri`" -Seconds $RealtimeSeconds -LogDir `"$resolvedLogDir\realtime`"" `
+        -Command "powershell -ExecutionPolicy Bypass -File scripts/qa/run_realtime_probes.ps1 -CoreRoot `"$resolvedCoreRoot`" -RtspUri `"$RtspUri`" -RtmpUri `"$RtmpUri`" -Seconds $RealtimeSeconds -LogDir `"$resolvedLogDir\realtime`"" `
         -LogPath (Join-Path $resolvedLogDir "realtime-probes.log")
     $summary.Add("realtime-probes=ok")
 } else {
@@ -142,7 +159,7 @@ $hasAvUris = -not [string]::IsNullOrWhiteSpace($RtspAvUri) -and -not [string]::I
 if ($hasAvUris) {
     $null = Invoke-Step `
         -Name "av-soak" `
-        -Command "powershell -ExecutionPolicy Bypass -File scripts/qa/run_av_soak.ps1 -RtspUri `"$RtspAvUri`" -RtmpUri `"$RtmpAvUri`" -Seconds $AvSeconds -LogDir `"$resolvedLogDir\av-soak`"" `
+        -Command "powershell -ExecutionPolicy Bypass -File scripts/qa/run_av_soak.ps1 -CoreRoot `"$resolvedCoreRoot`" -RtspUri `"$RtspAvUri`" -RtmpUri `"$RtmpAvUri`" -Seconds $AvSeconds -LogDir `"$resolvedLogDir\av-soak`"" `
         -LogPath (Join-Path $resolvedLogDir "av-soak.log")
     $summary.Add("av-soak=ok")
 } else {
@@ -153,7 +170,7 @@ $hasUnityUris = -not [string]::IsNullOrWhiteSpace($UnityRtspUri) -and -not [stri
 if ($hasUnityUris) {
     $null = Invoke-Step `
         -Name "unity-soak" `
-        -Command "powershell -ExecutionPolicy Bypass -File scripts/qa/run_unity_validation.ps1 -RustAVRoot `"$resolvedRoot`" -UnityProjectRoot `"$resolvedRoot\UnityAVExample`" -RtspUri `"$UnityRtspUri`" -RtmpUri `"$UnityRtmpUri`" -ValidationSeconds $UnitySeconds -SkipFileCase -AvSyncThresholdMs $UnityAvSyncThresholdMs -AvSyncWarmupSampleCount $UnityAvSyncWarmupSampleCount -FailOnAvSyncThresholdExceeded -LogDir `"$resolvedLogDir\unity-soak`"" `
+        -Command "powershell -ExecutionPolicy Bypass -File scripts/qa/run_unity_validation.ps1 -RustAVRoot `"$resolvedRoot`" -CoreRoot `"$resolvedCoreRoot`" -UnityProjectRoot `"$resolvedRoot\UnityAVExample`" -RtspUri `"$UnityRtspUri`" -RtmpUri `"$UnityRtmpUri`" -ValidationSeconds $UnitySeconds -SkipFileCase -AvSyncThresholdMs $UnityAvSyncThresholdMs -AvSyncWarmupSampleCount $UnityAvSyncWarmupSampleCount -FailOnAvSyncThresholdExceeded -LogDir `"$resolvedLogDir\unity-soak`"" `
         -LogPath (Join-Path $resolvedLogDir "unity-soak.log")
     $summary.Add("unity-soak=ok")
 } else {

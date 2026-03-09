@@ -16,7 +16,8 @@ from common import (
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--project-root", default=".")
+    parser.add_argument("--public-root", default=".")
+    parser.add_argument("--core-root", default=".")
     parser.add_argument("--manifest-path", default="ios-staticlib/Cargo.toml")
     parser.add_argument("--target-dir", default="target/ios-staticlib")
     parser.add_argument("--output-root", default="target/unity-package/ios")
@@ -24,11 +25,13 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    project_root = pathlib.Path(args.project_root).resolve()
-    manifest_path = resolve_path(project_root, args.manifest_path)
-    target_dir = resolve_path(project_root, args.target_dir)
-    output_root = resolve_path(project_root, args.output_root)
-    xcframework_output = resolve_path(project_root, args.xcframework_output)
+    public_root = pathlib.Path(args.public_root).resolve()
+    core_root = pathlib.Path(args.core_root).resolve()
+    manifest_path = resolve_path(core_root, args.manifest_path)
+    target_dir = resolve_path(core_root, args.target_dir)
+    output_root = resolve_path(public_root, args.output_root)
+    xcframework_output = resolve_path(public_root, args.xcframework_output)
+    header_root = public_root / "include"
 
     env = dict(**os.environ)
     env["CARGO_TARGET_DIR"] = str(target_dir)
@@ -47,7 +50,7 @@ def main() -> int:
             "--features",
             "mobile-ffmpeg-build",
         ],
-        cwd=project_root,
+        cwd=core_root,
         prefix="ios-build",
         dry_run=args.dry_run,
         env=env,
@@ -66,7 +69,7 @@ def main() -> int:
             "--features",
             "mobile-ffmpeg-build",
         ],
-        cwd=project_root,
+        cwd=core_root,
         prefix="ios-build",
         dry_run=args.dry_run,
         env=env,
@@ -80,15 +83,15 @@ def main() -> int:
                 "-library",
                 str(target_dir / "aarch64-apple-ios" / "release" / "librustav_native.a"),
                 "-headers",
-                "include",
+                str(header_root),
                 "-library",
                 str(target_dir / "aarch64-apple-ios-sim" / "release" / "librustav_native.a"),
                 "-headers",
-                "include",
+                str(header_root),
                 "-output",
                 str(xcframework_output),
             ],
-            cwd=project_root,
+            cwd=public_root,
             prefix="ios-build",
             dry_run=True,
         )
@@ -102,20 +105,20 @@ def main() -> int:
             "-library",
             str(target_dir / "aarch64-apple-ios" / "release" / "librustav_native.a"),
             "-headers",
-            "include",
+            str(header_root),
             "-library",
             str(target_dir / "aarch64-apple-ios-sim" / "release" / "librustav_native.a"),
             "-headers",
-            "include",
+            str(header_root),
             "-output",
             str(xcframework_output),
         ],
-        cwd=project_root,
+        cwd=public_root,
         prefix="ios-build",
         dry_run=False,
     )
 
-    copy_unity_managed_runtime(project_root, output_root)
+    copy_unity_managed_runtime(public_root, output_root)
     unity_dir = output_root / "Assets" / "Plugins" / "iOS"
     support_dir = output_root / "BuildSupport" / "iOS"
     ensure_directory(unity_dir)
@@ -125,7 +128,7 @@ def main() -> int:
         target_dir / "aarch64-apple-ios" / "release" / "librustav_native.a",
         unity_dir / "librustav_native.a",
     )
-    copy_file(project_root / "include" / "RustAV.h", unity_dir / "RustAV.h")
+    copy_file(public_root / "include" / "RustAV.h", unity_dir / "RustAV.h")
 
     xcframework_dest = support_dir / "RustAV.xcframework"
     replace_tree(xcframework_output, xcframework_dest)

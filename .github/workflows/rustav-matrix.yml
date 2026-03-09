@@ -1,59 +1,94 @@
-name: RustAV CI
+name: RustAV Public CI
 
 on:
   push:
     paths:
-      - "src/**"
-      - "include/**"
-      - "examples/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "UNITY_MOBILE_BUILD.md"
-      - "UNITY_PLUGIN_ABI.md"
-      - "UNITY_PLUGIN_PACKAGE_LAYOUT.md"
-      - "UNITY_RELEASE_AUTOMATION.md"
-      - "UNITY_WIN_IOS_ANDROID_PLAN.md"
-      - "UnityAVExample/**"
-      - "ios-staticlib/**"
-      - "third_party/**"
-      - "scripts/**"
-      - ".github/workflows/rustav-matrix.yml"
+      - '.github/workflows/rustav-matrix.yml'
+      - 'scripts/**'
+      - 'include/**'
+      - 'TestFiles/**'
+      - 'UnityAVExample/**'
+      - 'UNITY_*.md'
+      - 'PRODUCTION_RELEASE_CHECKLIST.md'
+      - 'README.md'
   pull_request:
     paths:
-      - "src/**"
-      - "include/**"
-      - "examples/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "UNITY_MOBILE_BUILD.md"
-      - "UNITY_PLUGIN_ABI.md"
-      - "UNITY_PLUGIN_PACKAGE_LAYOUT.md"
-      - "UNITY_RELEASE_AUTOMATION.md"
-      - "UNITY_WIN_IOS_ANDROID_PLAN.md"
-      - "UnityAVExample/**"
-      - "ios-staticlib/**"
-      - "third_party/**"
-      - "scripts/**"
-      - ".github/workflows/rustav-matrix.yml"
+      - '.github/workflows/rustav-matrix.yml'
+      - 'scripts/**'
+      - 'include/**'
+      - 'TestFiles/**'
+      - 'UnityAVExample/**'
+      - 'UNITY_*.md'
+      - 'PRODUCTION_RELEASE_CHECKLIST.md'
+      - 'README.md'
   workflow_dispatch:
+    inputs:
+      core_ref:
+        description: 'RustAV-Core git ref or SHA'
+        required: false
+        type: string
+
+permissions:
+  contents: read
 
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
+  CORE_REPOSITORY: zero16832/RustAV-Core
 
 jobs:
   windows-validate:
     name: Windows Native Validate
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout public repo
         uses: actions/checkout@v4
+
+      - name: Resolve core ref
+        id: core-ref
+        shell: pwsh
+        run: |
+          $coreRef = "${{ github.event.inputs.core_ref }}"
+          if ([string]::IsNullOrWhiteSpace($coreRef)) {
+            $coreRef = 'main'
+          }
+          "core_ref=$coreRef" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Validate RustAV-Core checkout credentials
+        shell: pwsh
+        run: |
+          $hasApp = (-not [string]::IsNullOrWhiteSpace("${{ vars.RUSTAV_CORE_APP_ID }}")) -and (-not [string]::IsNullOrWhiteSpace("${{ secrets.RUSTAV_CORE_APP_PRIVATE_KEY }}"))
+          $hasPat = -not [string]::IsNullOrWhiteSpace("${{ secrets.RUSTAV_CORE_CLONE_TOKEN }}")
+          if (-not $hasApp -and -not $hasPat) {
+            throw 'Configure vars.RUSTAV_CORE_APP_ID + secrets.RUSTAV_CORE_APP_PRIVATE_KEY, or secrets.RUSTAV_CORE_CLONE_TOKEN.'
+          }
+
+      - name: Create RustAV-Core app token
+        if: ${{ vars.RUSTAV_CORE_APP_ID != '' && secrets.RUSTAV_CORE_APP_PRIVATE_KEY != '' }}
+        id: core-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RUSTAV_CORE_APP_ID }}
+          private-key: ${{ secrets.RUSTAV_CORE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            RustAV-Core
+
+      - name: Checkout RustAV-Core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: ${{ steps.core-ref.outputs.core_ref }}
+          path: RustAV-Core
+          token: ${{ steps.core-app-token.outputs.token != '' && steps.core-app-token.outputs.token || secrets.RUSTAV_CORE_CLONE_TOKEN }}
+          persist-credentials: false
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: '3.x'
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -62,21 +97,21 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
-            . -> target
+            RustAV-Core -> RustAV-Core/target
 
       - name: Cache vcpkg
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}\.vcpkg
-          key: ${{ runner.os }}-vcpkg-x64-windows-${{ hashFiles('.github/workflows/rustav-matrix.yml', 'Cargo.lock') }}
+          key: ${{ runner.os }}-vcpkg-x64-windows-${{ hashFiles('.github/workflows/rustav-matrix.yml', 'RustAV-Core/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-vcpkg-x64-windows-
 
       - name: Setup FFmpeg (vcpkg)
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          $vcpkgRoot = Join-Path $env:GITHUB_WORKSPACE ".vcpkg"
+          $ErrorActionPreference = 'Stop'
+          $vcpkgRoot = Join-Path $env:GITHUB_WORKSPACE '.vcpkg'
 
           if (-not (Test-Path "$vcpkgRoot\.git")) {
             if (Test-Path $vcpkgRoot) {
@@ -89,11 +124,11 @@ jobs:
             & "$vcpkgRoot\bootstrap-vcpkg.bat" -disableMetrics
           }
 
-          & "$vcpkgRoot\vcpkg.exe" install "ffmpeg:x64-windows" --disable-metrics
+          & "$vcpkgRoot\vcpkg.exe" install 'ffmpeg:x64-windows' --disable-metrics
 
           "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "VCPKG_DEFAULT_TRIPLET=x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "VCPKGRS_DYNAMIC=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          'VCPKG_DEFAULT_TRIPLET=x64-windows' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          'VCPKGRS_DYNAMIC=1' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
           "$vcpkgRoot\installed\x64-windows\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "$vcpkgRoot\installed\x64-windows\tools\ffmpeg" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
@@ -101,22 +136,22 @@ jobs:
       - name: Cargo Check
         shell: pwsh
         run: |
-          cargo check --manifest-path Cargo.toml --lib --examples --locked
+          cargo check --manifest-path RustAV-Core/Cargo.toml --lib --examples --locked
 
       - name: Cargo Test
         shell: pwsh
         run: |
-          cargo test --manifest-path Cargo.toml --lib --tests --locked
+          cargo test --manifest-path RustAV-Core/Cargo.toml --lib --tests --locked
 
       - name: Validate CI Entrypoints
         shell: pwsh
         run: |
-          python scripts/ci/validate_ci_entrypoints.py
+          python scripts/ci/validate_ci_entrypoints.py --public-root "$env:GITHUB_WORKSPACE" --core-root "$env:GITHUB_WORKSPACE\RustAV-Core"
 
       - name: Build Windows Unity Plugin
         shell: pwsh
         run: |
-          python scripts/ci/build_unity_plugins.py --project-root "$env:GITHUB_WORKSPACE" --platform windows --output-root "target/unity-package/windows"
+          python scripts/ci/build_unity_plugins.py --public-root "$env:GITHUB_WORKSPACE" --core-root "$env:GITHUB_WORKSPACE\RustAV-Core" --platform windows --output-root 'target/unity-package/windows'
 
       - name: Cache MediaMTX
         uses: actions/cache@v4
@@ -127,7 +162,7 @@ jobs:
       - name: Setup Validation Tools
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = 'Stop'
 
           if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
             choco install ffmpeg --yes --no-progress
@@ -135,17 +170,17 @@ jobs:
 
           $ffmpegPath = (Get-Command ffmpeg -ErrorAction Stop).Source
           $ffmpegEncoders = & $ffmpegPath -hide_banner -encoders
-          if (-not ($ffmpegEncoders | Select-String "libx264")) {
-            throw "ffmpeg does not provide libx264 encoder"
+          if (-not ($ffmpegEncoders | Select-String 'libx264')) {
+            throw 'ffmpeg does not provide libx264 encoder'
           }
 
-          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE ".ci-tools"
-          $mediamtxDir = Join-Path $toolsRoot "mediamtx_v1.16.3_windows_amd64"
-          $mediamtxExe = Join-Path $mediamtxDir "mediamtx.exe"
+          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE '.ci-tools'
+          $mediamtxDir = Join-Path $toolsRoot 'mediamtx_v1.16.3_windows_amd64'
+          $mediamtxExe = Join-Path $mediamtxDir 'mediamtx.exe'
           if (-not (Test-Path $mediamtxExe)) {
             New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
-            $zipPath = Join-Path $toolsRoot "mediamtx_v1.16.3_windows_amd64.zip"
-            Invoke-WebRequest -Uri "https://github.com/bluenviron/mediamtx/releases/download/v1.16.3/mediamtx_v1.16.3_windows_amd64.zip" -OutFile $zipPath
+            $zipPath = Join-Path $toolsRoot 'mediamtx_v1.16.3_windows_amd64.zip'
+            Invoke-WebRequest -Uri 'https://github.com/bluenviron/mediamtx/releases/download/v1.16.3/mediamtx_v1.16.3_windows_amd64.zip' -OutFile $zipPath
             if (Test-Path $mediamtxDir) {
               Remove-Item -LiteralPath $mediamtxDir -Recurse -Force
             }
@@ -160,8 +195,9 @@ jobs:
         run: |
           powershell -ExecutionPolicy Bypass -File scripts/qa/run_win32_visual_validation.ps1 `
             -RustAVRoot "$env:GITHUB_WORKSPACE" `
-            -RtspUri "rtsp://127.0.0.1:8554/mystream" `
-            -RtmpUri "rtmp://127.0.0.1:1935/mystream" `
+            -CoreRoot "$env:GITHUB_WORKSPACE\RustAV-Core" `
+            -RtspUri 'rtsp://127.0.0.1:8554/mystream' `
+            -RtmpUri 'rtmp://127.0.0.1:1935/mystream' `
             -ValidationSeconds 8 `
             -MinPlaybackSeconds 2.0 `
             -FfmpegExe "$env:FFMPEG_EXE" `
@@ -192,13 +228,13 @@ jobs:
       UNITY_PROJECT_PATH: UnityAVExample
 
     steps:
-      - name: Checkout
+      - name: Checkout public repo
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: '3.x'
 
       - name: Download Windows Plugin Artifact
         uses: actions/download-artifact@v4
@@ -208,7 +244,7 @@ jobs:
 
       - name: Inject Plugins Into Unity Project
         run: |
-          python3 scripts/ci/sync_unity_plugins_to_project.py --project-root "$GITHUB_WORKSPACE" --unity-project "$UNITY_PROJECT_PATH" --plugins-root "artifacts/windows/Assets/Plugins" --managed-runtime-root "artifacts/windows/Assets/UnityAV"
+          python3 scripts/ci/sync_unity_plugins_to_project.py --public-root "$GITHUB_WORKSPACE" --unity-project "$UNITY_PROJECT_PATH" --plugins-root 'artifacts/windows/Assets/Plugins' --managed-runtime-root 'artifacts/windows/Assets/UnityAV'
 
       - name: Cache Unity Library
         uses: actions/cache@v4
@@ -245,7 +281,7 @@ jobs:
       - unity-validation-build
 
     steps:
-      - name: Checkout
+      - name: Checkout public repo
         uses: actions/checkout@v4
 
       - name: Cache MediaMTX
@@ -257,7 +293,7 @@ jobs:
       - name: Setup Validation Tools
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = 'Stop'
 
           if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
             choco install ffmpeg --yes --no-progress
@@ -265,17 +301,17 @@ jobs:
 
           $ffmpegPath = (Get-Command ffmpeg -ErrorAction Stop).Source
           $ffmpegEncoders = & $ffmpegPath -hide_banner -encoders
-          if (-not ($ffmpegEncoders | Select-String "libx264")) {
-            throw "ffmpeg does not provide libx264 encoder"
+          if (-not ($ffmpegEncoders | Select-String 'libx264')) {
+            throw 'ffmpeg does not provide libx264 encoder'
           }
 
-          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE ".ci-tools"
-          $mediamtxDir = Join-Path $toolsRoot "mediamtx_v1.16.3_windows_amd64"
-          $mediamtxExe = Join-Path $mediamtxDir "mediamtx.exe"
+          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE '.ci-tools'
+          $mediamtxDir = Join-Path $toolsRoot 'mediamtx_v1.16.3_windows_amd64'
+          $mediamtxExe = Join-Path $mediamtxDir 'mediamtx.exe'
           if (-not (Test-Path $mediamtxExe)) {
             New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
-            $zipPath = Join-Path $toolsRoot "mediamtx_v1.16.3_windows_amd64.zip"
-            Invoke-WebRequest -Uri "https://github.com/bluenviron/mediamtx/releases/download/v1.16.3/mediamtx_v1.16.3_windows_amd64.zip" -OutFile $zipPath
+            $zipPath = Join-Path $toolsRoot 'mediamtx_v1.16.3_windows_amd64.zip'
+            Invoke-WebRequest -Uri 'https://github.com/bluenviron/mediamtx/releases/download/v1.16.3/mediamtx_v1.16.3_windows_amd64.zip' -OutFile $zipPath
             if (Test-Path $mediamtxDir) {
               Remove-Item -LiteralPath $mediamtxDir -Recurse -Force
             }
@@ -296,10 +332,9 @@ jobs:
         run: |
           powershell -ExecutionPolicy Bypass -File scripts/qa/run_unity_visual_validation.ps1 `
             -RustAVRoot "$env:GITHUB_WORKSPACE" `
-            -UnityProjectRoot "UnityAVExample" `
             -ValidationPlayerExe "$env:GITHUB_WORKSPACE\UnityAVExample\Build\CodexPullValidation\CodexPullValidation.exe" `
-            -RtspUri "rtsp://127.0.0.1:8554/mystream" `
-            -RtmpUri "rtmp://127.0.0.1:1935/mystream" `
+            -RtspUri 'rtsp://127.0.0.1:8554/mystream' `
+            -RtmpUri 'rtmp://127.0.0.1:1935/mystream' `
             -ValidationSeconds 8 `
             -MinPlaybackSeconds 2.0 `
             -AvSyncThresholdMs 200 `
@@ -316,13 +351,53 @@ jobs:
 
   android-build:
     name: Android arm64 Build
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     env:
       CARGO_NDK_PLATFORM: 21
 
     steps:
-      - name: Checkout
+      - name: Checkout public repo
         uses: actions/checkout@v4
+
+      - name: Resolve core ref
+        id: core-ref
+        shell: pwsh
+        run: |
+          $coreRef = "${{ github.event.inputs.core_ref }}"
+          if ([string]::IsNullOrWhiteSpace($coreRef)) {
+            $coreRef = 'main'
+          }
+          "core_ref=$coreRef" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Validate RustAV-Core checkout credentials
+        shell: pwsh
+        run: |
+          $hasApp = (-not [string]::IsNullOrWhiteSpace("${{ vars.RUSTAV_CORE_APP_ID }}")) -and (-not [string]::IsNullOrWhiteSpace("${{ secrets.RUSTAV_CORE_APP_PRIVATE_KEY }}"))
+          $hasPat = -not [string]::IsNullOrWhiteSpace("${{ secrets.RUSTAV_CORE_CLONE_TOKEN }}")
+          if (-not $hasApp -and -not $hasPat) {
+            throw 'Configure vars.RUSTAV_CORE_APP_ID + secrets.RUSTAV_CORE_APP_PRIVATE_KEY, or secrets.RUSTAV_CORE_CLONE_TOKEN.'
+          }
+
+      - name: Create RustAV-Core app token
+        if: ${{ vars.RUSTAV_CORE_APP_ID != '' && secrets.RUSTAV_CORE_APP_PRIVATE_KEY != '' }}
+        id: core-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RUSTAV_CORE_APP_ID }}
+          private-key: ${{ secrets.RUSTAV_CORE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            RustAV-Core
+
+      - name: Checkout RustAV-Core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: ${{ steps.core-ref.outputs.core_ref }}
+          path: RustAV-Core
+          token: ${{ steps.core-app-token.outputs.token != '' && steps.core-app-token.outputs.token || secrets.RUSTAV_CORE_CLONE_TOKEN }}
+          persist-credentials: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -333,7 +408,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
-            . -> target
+            RustAV-Core -> RustAV-Core/target
+
+      - name: Cache Cargo Tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-ndk
+          key: ${{ runner.os }}-cargo-ndk-0.1
 
       - name: Install Linux Build Dependencies
         run: |
@@ -347,14 +428,17 @@ jobs:
           ndk-version: r26d
 
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
+        run: |
+          if ! command -v cargo-ndk >/dev/null 2>&1; then
+            cargo install cargo-ndk --locked
+          fi
 
       - name: Build Android Unity Plugin
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          python3 scripts/ci/build_unity_plugins.py --project-root "$GITHUB_WORKSPACE" --platform android --output-root "target/unity-package/android" --cargo-ndk-output "target/android-unity-libs" --abi arm64-v8a
+          python3 scripts/ci/build_unity_plugins.py --public-root "$GITHUB_WORKSPACE" --core-root "$GITHUB_WORKSPACE/RustAV-Core" --platform android --output-root 'target/unity-package/android' --cargo-ndk-output 'target/android-unity-libs' --abi arm64-v8a
 
       - name: Upload Android Artifact
         uses: actions/upload-artifact@v4
@@ -365,13 +449,51 @@ jobs:
 
   ios-build:
     name: iOS XCFramework Build
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: macos-latest
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ios-staticlib
 
     steps:
-      - name: Checkout
+      - name: Checkout public repo
         uses: actions/checkout@v4
+
+      - name: Resolve core ref
+        id: core-ref
+        shell: pwsh
+        run: |
+          $coreRef = "${{ github.event.inputs.core_ref }}"
+          if ([string]::IsNullOrWhiteSpace($coreRef)) {
+            $coreRef = 'main'
+          }
+          "core_ref=$coreRef" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Validate RustAV-Core checkout credentials
+        shell: pwsh
+        run: |
+          $hasApp = (-not [string]::IsNullOrWhiteSpace("${{ vars.RUSTAV_CORE_APP_ID }}")) -and (-not [string]::IsNullOrWhiteSpace("${{ secrets.RUSTAV_CORE_APP_PRIVATE_KEY }}"))
+          $hasPat = -not [string]::IsNullOrWhiteSpace("${{ secrets.RUSTAV_CORE_CLONE_TOKEN }}")
+          if (-not $hasApp -and -not $hasPat) {
+            throw 'Configure vars.RUSTAV_CORE_APP_ID + secrets.RUSTAV_CORE_APP_PRIVATE_KEY, or secrets.RUSTAV_CORE_CLONE_TOKEN.'
+          }
+
+      - name: Create RustAV-Core app token
+        if: ${{ vars.RUSTAV_CORE_APP_ID != '' && secrets.RUSTAV_CORE_APP_PRIVATE_KEY != '' }}
+        id: core-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RUSTAV_CORE_APP_ID }}
+          private-key: ${{ secrets.RUSTAV_CORE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            RustAV-Core
+
+      - name: Checkout RustAV-Core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: ${{ steps.core-ref.outputs.core_ref }}
+          path: RustAV-Core
+          token: ${{ steps.core-app-token.outputs.token != '' && steps.core-app-token.outputs.token || secrets.RUSTAV_CORE_CLONE_TOKEN }}
+          persist-credentials: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -382,7 +504,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
-            . -> target
+            RustAV-Core -> RustAV-Core/target
+
+      - name: Cache Xcode Derived Data
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: ${{ runner.os }}-xcode-derived-${{ hashFiles('RustAV-Core/ios-staticlib/Cargo.toml', 'RustAV-Core/Cargo.lock', '.github/workflows/rustav-matrix.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-xcode-derived-
 
       - name: Show Xcode Version
         run: |
@@ -390,7 +520,7 @@ jobs:
 
       - name: Build iOS Unity Plugin
         run: |
-          python3 scripts/ci/build_unity_plugins.py --project-root "$GITHUB_WORKSPACE" --platform ios --manifest-path "ios-staticlib/Cargo.toml" --target-dir "target/ios-staticlib" --output-root "target/unity-package/ios" --xcframework-output "target/apple-unity/RustAV.xcframework"
+          python3 scripts/ci/build_unity_plugins.py --public-root "$GITHUB_WORKSPACE" --core-root "$GITHUB_WORKSPACE/RustAV-Core" --platform ios --manifest-path 'ios-staticlib/Cargo.toml' --target-dir 'target/ios-staticlib' --output-root 'target/unity-package/ios' --xcframework-output 'target/apple-unity/RustAV.xcframework'
 
       - name: Upload iOS Artifact
         uses: actions/upload-artifact@v4
@@ -401,6 +531,7 @@ jobs:
 
   unity-plugins-package:
     name: Package Unity Plugins Bundle
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     needs:
       - windows-validate
       - android-build
@@ -408,7 +539,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout public repo
         uses: actions/checkout@v4
 
       - name: Download Windows Artifact
@@ -431,7 +562,7 @@ jobs:
 
       - name: Assemble Unity Plugins Bundle
         run: |
-          python3 scripts/ci/build_unity_plugins.py --project-root "$GITHUB_WORKSPACE" --platform package --windows-artifact "artifacts/windows" --android-artifact "artifacts/android" --ios-artifact "artifacts/ios" --bundle-root "UnityPlugins" --zip-output "RustAV-UnityPlugins.zip"
+          python3 scripts/ci/build_unity_plugins.py --public-root "$GITHUB_WORKSPACE" --platform package --windows-artifact 'artifacts/windows' --android-artifact 'artifacts/android' --ios-artifact 'artifacts/ios' --bundle-root 'UnityPlugins' --zip-output 'RustAV-UnityPlugins.zip'
 
       - name: Upload Unity Plugins Bundle
         uses: actions/upload-artifact@v4

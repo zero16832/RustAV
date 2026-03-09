@@ -35,23 +35,23 @@ def prune_runtime_docs(root: pathlib.Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--project-root", default=".")
+    parser.add_argument("--public-root", default=".")
     parser.add_argument("--unity-project", required=True)
     parser.add_argument("--plugins-root", required=True)
     parser.add_argument("--managed-runtime-root", default="")
     parser.add_argument("--build-support-root", default="")
     args = parser.parse_args()
 
-    project_root = pathlib.Path(args.project_root).resolve()
-    unity_project = resolve_path(project_root, args.unity_project)
-    plugins_root = resolve_path(project_root, args.plugins_root)
+    public_root = pathlib.Path(args.public_root).resolve()
+    unity_project = resolve_path(public_root, args.unity_project)
+    plugins_root = resolve_path(public_root, args.plugins_root)
     managed_runtime_root = (
-        resolve_path(project_root, args.managed_runtime_root)
+        resolve_path(public_root, args.managed_runtime_root)
         if args.managed_runtime_root
         else None
     )
     build_support_root = (
-        resolve_path(project_root, args.build_support_root)
+        resolve_path(public_root, args.build_support_root)
         if args.build_support_root
         else None
     )
@@ -97,7 +97,7 @@ def main() -> int:
             else:
                 shutil.copy2(item, target)
 
-    sync_unity_sample_media(project_root, unity_project)
+    sync_unity_sample_media(public_root, unity_project)
 
     print(f"[unity-sync] unity_project={unity_project}")
     print(f"[unity-sync] plugins_root={plugins_root}")
@@ -105,7 +105,7 @@ def main() -> int:
         print(f"[unity-sync] managed_runtime_root={managed_runtime_root}")
     if build_support_root and build_support_root.exists():
         print(f"[unity-sync] build_support_root={build_support_root}")
-    print(f"[unity-sync] sample_media_root={project_root / 'TestFiles'}")
+    print(f"[unity-sync] sample_media_root={public_root / 'TestFiles'}")
     return 0
 
 

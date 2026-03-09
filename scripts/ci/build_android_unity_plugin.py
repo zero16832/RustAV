@@ -14,16 +14,18 @@ from common import (
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--project-root", default=".")
+    parser.add_argument("--public-root", default=".")
+    parser.add_argument("--core-root", default=".")
     parser.add_argument("--output-root", default="target/unity-package/android")
     parser.add_argument("--cargo-ndk-output", default="target/android-unity-libs")
     parser.add_argument("--abi", default="arm64-v8a")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    project_root = pathlib.Path(args.project_root).resolve()
-    output_root = resolve_path(project_root, args.output_root)
-    cargo_ndk_output = resolve_path(project_root, args.cargo_ndk_output)
+    public_root = pathlib.Path(args.public_root).resolve()
+    core_root = pathlib.Path(args.core_root).resolve()
+    output_root = resolve_path(public_root, args.output_root)
+    cargo_ndk_output = resolve_path(core_root, args.cargo_ndk_output)
 
     run(
         [
@@ -40,7 +42,7 @@ def main() -> int:
             "--features",
             "mobile-ffmpeg-build",
         ],
-        cwd=project_root,
+        cwd=core_root,
         prefix="android-build",
         dry_run=args.dry_run,
     )
@@ -48,7 +50,7 @@ def main() -> int:
     if args.dry_run:
         return 0
 
-    copy_unity_managed_runtime(project_root, output_root)
+    copy_unity_managed_runtime(public_root, output_root)
     package_dir = output_root / "Assets" / "Plugins" / "Android" / args.abi
     ensure_directory(package_dir)
 

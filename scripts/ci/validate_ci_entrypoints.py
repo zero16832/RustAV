@@ -10,12 +10,19 @@ from common import run
 
 
 def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--public-root", default=".")
+    parser.add_argument("--core-root", default=".")
+    args = parser.parse_args()
+
     script_dir = pathlib.Path(__file__).resolve().parent
-    project_root = script_dir.parent.parent
+    public_root = pathlib.Path(args.public_root).resolve()
+    core_root = pathlib.Path(args.core_root).resolve()
 
     entrypoints = [
         script_dir / "common.py",
-        script_dir / "ffmpeg_sys_next_patch_common.py",
         script_dir / "build_windows_unity_plugin.py",
         script_dir / "build_android_unity_plugin.py",
         script_dir / "build_ios_unity_plugin.py",
@@ -29,7 +36,7 @@ def main() -> int:
 
     run(
         [sys.executable, "-m", "py_compile", *[str(path) for path in entrypoints]],
-        cwd=project_root,
+        cwd=public_root,
         prefix="ci-validate",
         dry_run=False,
     )
@@ -38,36 +45,44 @@ def main() -> int:
         [
             sys.executable,
             str(script_dir / "build_windows_unity_plugin.py"),
-            "--project-root",
-            str(project_root),
+            "--public-root",
+            str(public_root),
+            "--core-root",
+            str(core_root),
             "--dry-run",
         ],
         [
             sys.executable,
             str(script_dir / "build_android_unity_plugin.py"),
-            "--project-root",
-            str(project_root),
+            "--public-root",
+            str(public_root),
+            "--core-root",
+            str(core_root),
             "--dry-run",
         ],
         [
             sys.executable,
             str(script_dir / "build_ios_unity_plugin.py"),
-            "--project-root",
-            str(project_root),
+            "--public-root",
+            str(public_root),
+            "--core-root",
+            str(core_root),
             "--dry-run",
         ],
         [
             sys.executable,
             str(script_dir / "assemble_unity_plugins_bundle.py"),
-            "--project-root",
-            str(project_root),
+            "--public-root",
+            str(public_root),
             "--dry-run",
         ],
         [
             sys.executable,
             str(script_dir / "build_unity_plugins.py"),
-            "--project-root",
-            str(project_root),
+            "--public-root",
+            str(public_root),
+            "--core-root",
+            str(core_root),
             "--platform",
             "all",
             "--dry-run",
@@ -75,13 +90,15 @@ def main() -> int:
         [
             sys.executable,
             str(script_dir / "compute_release_version.py"),
-            "--project-root",
-            str(project_root),
+            "--public-root",
+            str(public_root),
+            "--core-root",
+            str(core_root),
         ],
     ]
 
     for cmd in dry_run_commands:
-        run(cmd, cwd=project_root, prefix="ci-validate", dry_run=False)
+        run(cmd, cwd=public_root, prefix="ci-validate", dry_run=False)
 
     print("[ci-validate] all CI entrypoint dry-run checks passed")
     return 0

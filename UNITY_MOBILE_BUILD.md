@@ -53,9 +53,9 @@ Windows 纹理专属接口：
 
 1. GitHub Actions：`ubuntu-latest + Android NDK + cargo-ndk`
 2. 当前通过 `mobile-ffmpeg-build` 在云端源码构建 FFmpeg
-3. `ffmpeg-sys-next 8.0.1` 已固化到仓库内 `third_party/ffmpeg-sys-next-8.0.1`
+3. `ffmpeg-sys-next 8.0.1` 已固化到私有仓 `RustAV-Core/third_party/ffmpeg-sys-next-8.0.1`
 4. 正式构建入口：
-   `python3 scripts/ci/build_unity_plugins.py --platform android --output-root target/unity-package/android --cargo-ndk-output target/android-unity-libs --abi arm64-v8a`
+   `python3 scripts/ci/build_unity_plugins.py --public-root . --core-root ../RustAV-Core --platform android --output-root target/unity-package/android --cargo-ndk-output target/android-unity-libs --abi arm64-v8a`
 
 ## iOS
 
@@ -73,10 +73,10 @@ Windows 纹理专属接口：
 
 1. GitHub Actions：`macos-latest + Xcode + rustup targets`
 2. 当前通过 `mobile-ffmpeg-build` 在云端源码构建 FFmpeg
-3. iOS 使用独立 manifest：`ios-staticlib/Cargo.toml`
-4. `ffmpeg-sys-next 8.0.1` 已固化到仓库内 `third_party/ffmpeg-sys-next-8.0.1`
+3. iOS 使用私有 core 中的独立 manifest：`RustAV-Core/ios-staticlib/Cargo.toml`
+4. `ffmpeg-sys-next 8.0.1` 已固化到私有仓 `RustAV-Core/third_party/ffmpeg-sys-next-8.0.1`
 5. 正式构建入口：
-   `python3 scripts/ci/build_unity_plugins.py --platform ios --manifest-path ios-staticlib/Cargo.toml --target-dir target/ios-staticlib --output-root target/unity-package/ios --xcframework-output target/apple-unity/RustAV.xcframework`
+   `python3 scripts/ci/build_unity_plugins.py --public-root . --core-root ../RustAV-Core --platform ios --manifest-path ios-staticlib/Cargo.toml --target-dir target/ios-staticlib --output-root target/unity-package/ios --xcframework-output target/apple-unity/RustAV.xcframework`
 6. 构建结束后通过 `xcodebuild -create-xcframework` 打包，并将 `RustAV.xcframework` 放到 `BuildSupport/iOS`
 7. iOS C# 侧统一使用 `DllImport("__Internal")`
 
@@ -95,7 +95,7 @@ Windows 纹理专属接口：
 2. SDL 已经不再是 Unity 主链路依赖
 3. Windows 纹理路径继续保留，Pull 路径与移动端保持 ABI 一致
 4. 正式构建入口：
-   `python scripts/ci/build_unity_plugins.py --platform windows --output-root target/unity-package/windows`
+   `python scripts/ci/build_unity_plugins.py --public-root . --core-root ../RustAV-Core --platform windows --output-root target/unity-package/windows`
 
 ## 同步闭环要求
 
@@ -117,3 +117,4 @@ Windows 纹理专属接口：
 7. Unity 正式构建通过 `game-ci/unity-builder@v4 + UnityAV.Editor.RustAVReleaseBuild.BuildFromCi` 执行
 8. 插件包中的 Unity 托管层改为源码分发，`UnityAV.dll` 不再是运行或发布必需项
 9. `UnityAVExample/Assets/UnityAV` 当前按 `Runtime / Editor / Validation / Materials / Scenes` 分层
+10. 公开仓只保留编排层，Rust 核心源码、examples、tests、第三方补丁位于私有仓 `RustAV-Core`

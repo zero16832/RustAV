@@ -28,8 +28,8 @@ def android_version_code(version: tuple[int, int, int]) -> int:
     return (version[0] * 10000) + (version[1] * 100) + version[2]
 
 
-def load_cargo_version(project_root: pathlib.Path) -> tuple[int, int, int]:
-    cargo_toml = project_root / "Cargo.toml"
+def load_cargo_version(core_root: pathlib.Path) -> tuple[int, int, int]:
+    cargo_toml = core_root / "Cargo.toml"
     with cargo_toml.open("rb") as handle:
         data = tomllib.load(handle)
     return parse_version(data["package"]["version"])
@@ -78,13 +78,15 @@ def write_github_output(version: str, tag: str, android_code: int) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--project-root", default=".")
+    parser.add_argument("--public-root", default=".")
+    parser.add_argument("--core-root", default=".")
     parser.add_argument("--github-output", action="store_true")
     args = parser.parse_args()
 
-    project_root = pathlib.Path(args.project_root).resolve()
-    cargo_version = load_cargo_version(project_root)
-    tag_versions = list_git_tags(project_root)
+    public_root = pathlib.Path(args.public_root).resolve()
+    core_root = pathlib.Path(args.core_root).resolve()
+    cargo_version = load_cargo_version(core_root)
+    tag_versions = list_git_tags(public_root)
     next_version = compute_next_version(cargo_version, tag_versions)
     version = version_to_string(next_version)
     tag = f"v{version}"

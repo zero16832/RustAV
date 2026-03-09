@@ -1,6 +1,8 @@
 param(
     [string]$RustAVRoot = "D:\TestProject\Video\RustAV",
 
+    [string]$CoreRoot = "",
+
     [string]$UnityProjectRoot = "UnityAVExample",
 
     [string]$UnityExe = "C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe",
@@ -273,6 +275,7 @@ try {
         "-ExecutionPolicy", "Bypass",
         "-File", (Join-Path $resolvedRustRoot "scripts\qa\run_unity_validation.ps1"),
         "-RustAVRoot", $resolvedRustRoot,
+        "-CoreRoot", $CoreRoot,
         "-UnityProjectRoot", $UnityProjectRoot,
         "-RtspUri", $RtspUri,
         "-RtmpUri", $RtmpUri,

@@ -1,6 +1,8 @@
 param(
     [string]$RustAVRoot = "D:\TestProject\Video\RustAV",
 
+    [string]$CoreRoot = "",
+
     [string]$RtspUri = "rtsp://127.0.0.1:8554/mystream",
 
     [string]$RtmpUri = "rtmp://127.0.0.1:1935/mystream",
@@ -78,6 +80,34 @@ function Wait-ForTcpPort {
     throw "[win32-qa] timeout waiting for $($Host):$Port"
 }
 
+function Resolve-CoreRootPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PublicRoot,
+
+        [string]$ConfiguredValue = ""
+    )
+
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredValue)) {
+        $candidates += $ConfiguredValue
+    }
+    $candidates += (Join-Path $PublicRoot "..\\RustAV-Core")
+    $candidates += $PublicRoot
+
+    foreach ($candidate in $candidates) {
+        $resolvedCandidate = $candidate
+        if (-not [System.IO.Path]::IsPathRooted($resolvedCandidate)) {
+            $resolvedCandidate = Join-Path $PublicRoot $resolvedCandidate
+        }
+        if (Test-Path $resolvedCandidate) {
+            return (Resolve-Path $resolvedCandidate).Path
+        }
+    }
+
+    throw "[win32-qa] core root not found"
+}
+
 function Start-MediaMtxServer {
     param(
         [Parameter(Mandatory = $true)]
@@ -106,7 +136,7 @@ function Start-MediaMtxServer {
 function Invoke-PlayerValidation {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$RustRoot,
+        [string]$CoreProjectRoot,
 
         [Parameter(Mandatory = $true)]
         [string]$CaseName,
@@ -121,7 +151,7 @@ function Invoke-PlayerValidation {
     )
 
     $command = @(
-        "cargo run --manifest-path `"$RustRoot\Cargo.toml`" --example test_player --",
+        "cargo run --manifest-path `"$CoreProjectRoot\Cargo.toml`" --example test_player --",
         "--max-seconds=$ValidationSeconds",
         "--min-playback-seconds=$MinPlaybackSeconds",
         "--validate"
@@ -245,6 +275,7 @@ function Stop-FfmpegPublisher {
 }
 
 $resolvedRustRoot = (Resolve-Path $RustAVRoot).Path
+$resolvedCoreRoot = Resolve-CoreRootPath -PublicRoot $resolvedRustRoot -ConfiguredValue $CoreRoot
 $resolvedVideoPath = $VideoPath
 if (-not [System.IO.Path]::IsPathRooted($resolvedVideoPath)) {
     $resolvedVideoPath = Join-Path $resolvedRustRoot $resolvedVideoPath
@@ -283,7 +314,7 @@ try {
     }
 
     $summaries += Invoke-PlayerValidation `
-        -RustRoot $resolvedRustRoot `
+        -CoreProjectRoot $resolvedCoreRoot `
         -CaseName "file" `
         -LogPath $fileLog `
         -Uri $resolvedVideoPath `
@@ -296,7 +327,7 @@ try {
         -StdOutLog $rtspPublisherOut `
         -StdErrLog $rtspPublisherErr
     $summaries += Invoke-PlayerValidation `
-        -RustRoot $resolvedRustRoot `
+        -CoreProjectRoot $resolvedCoreRoot `
         -CaseName "rtsp" `
         -LogPath $rtspLog `
         -Uri $RtspUri `
@@ -312,7 +343,7 @@ try {
         -StdOutLog $rtmpPublisherOut `
         -StdErrLog $rtmpPublisherErr
     $summaries += Invoke-PlayerValidation `
-        -RustRoot $resolvedRustRoot `
+        -CoreProjectRoot $resolvedCoreRoot `
         -CaseName "rtmp" `
         -LogPath $rtmpLog `
         -Uri $RtmpUri `

@@ -26,7 +26,7 @@ def zip_directory(source_dir: pathlib.Path, zip_path: pathlib.Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--project-root", default=".")
+    parser.add_argument("--public-root", default=".")
     parser.add_argument("--windows-artifact", default="artifacts/windows")
     parser.add_argument("--android-artifact", default="artifacts/android")
     parser.add_argument("--ios-artifact", default="artifacts/ios")
@@ -35,13 +35,13 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    project_root = pathlib.Path(args.project_root).resolve()
+    public_root = pathlib.Path(args.public_root).resolve()
 
-    windows_artifact = resolve_path(project_root, args.windows_artifact)
-    android_artifact = resolve_path(project_root, args.android_artifact)
-    ios_artifact = resolve_path(project_root, args.ios_artifact)
-    bundle_root = resolve_path(project_root, args.bundle_root)
-    zip_output = resolve_path(project_root, args.zip_output)
+    windows_artifact = resolve_path(public_root, args.windows_artifact)
+    android_artifact = resolve_path(public_root, args.android_artifact)
+    ios_artifact = resolve_path(public_root, args.ios_artifact)
+    bundle_root = resolve_path(public_root, args.bundle_root)
+    zip_output = resolve_path(public_root, args.zip_output)
 
     print(f"[bundle] windows={windows_artifact}")
     print(f"[bundle] android={android_artifact}")
@@ -56,7 +56,7 @@ def main() -> int:
     copy_tree_contents(windows_artifact, bundle_root)
     copy_tree_contents(android_artifact, bundle_root)
     copy_tree_contents(ios_artifact, bundle_root)
-    copy_file(project_root / "UNITY_PLUGIN_PACKAGE_LAYOUT.md", bundle_root / "README.md")
+    copy_file(public_root / "UNITY_PLUGIN_PACKAGE_LAYOUT.md", bundle_root / "README.md")
 
     if zip_output.exists():
         zip_output.unlink()

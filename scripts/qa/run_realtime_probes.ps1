@@ -1,4 +1,6 @@
 param(
+    [string]$CoreRoot = "",
+
     [Parameter(Mandatory = $true)]
     [string]$RtspUri,
 
@@ -11,6 +13,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($CoreRoot)) {
+    $CoreRoot = (Get-Location).Path
+} else {
+    $CoreRoot = (Resolve-Path $CoreRoot).Path
+}
 function Invoke-Probe {
     param(
         [Parameter(Mandatory = $true)]
@@ -24,7 +31,7 @@ function Invoke-Probe {
     )
 
     Write-Host "[qa] running $Example uri=$Uri seconds=$Seconds"
-    $command = "cargo run --example $Example -- `"$Uri`" $Seconds 2>&1"
+    $command = "cargo run --manifest-path `"$CoreRoot\Cargo.toml`" --example $Example -- `"$Uri`" $Seconds 2>&1"
     $output = & cmd /c $command | ForEach-Object {
         "$_"
     }

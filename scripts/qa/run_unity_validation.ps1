@@ -1,6 +1,8 @@
 param(
     [string]$RustAVRoot = "D:\TestProject\Video\RustAV",
 
+    [string]$CoreRoot = "",
+
     [string]$UnityProjectRoot = "UnityAVExample",
 
     [string]$UnityExe = "C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe",
@@ -87,6 +89,34 @@ function Invoke-Step {
     }
 
     return $output
+}
+
+function Resolve-CoreRootPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PublicRoot,
+
+        [string]$ConfiguredValue = ""
+    )
+
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredValue)) {
+        $candidates += $ConfiguredValue
+    }
+    $candidates += (Join-Path $PublicRoot "..\\RustAV-Core")
+    $candidates += $PublicRoot
+
+    foreach ($candidate in $candidates) {
+        $resolvedCandidate = $candidate
+        if (-not [System.IO.Path]::IsPathRooted($resolvedCandidate)) {
+            $resolvedCandidate = Join-Path $PublicRoot $resolvedCandidate
+        }
+        if (Test-Path $resolvedCandidate) {
+            return (Resolve-Path $resolvedCandidate).Path
+        }
+    }
+
+    throw "[unity-qa] core root not found"
 }
 
 function Sync-UnityPlugins {
@@ -366,6 +396,7 @@ function Get-ValidationSummary {
 }
 
 $resolvedRustRoot = (Resolve-Path $RustAVRoot).Path
+$resolvedCoreRoot = Resolve-CoreRootPath -PublicRoot $resolvedRustRoot -ConfiguredValue $CoreRoot
 $unityProjectCandidate = $UnityProjectRoot
 if (-not [System.IO.Path]::IsPathRooted($unityProjectCandidate)) {
     $unityProjectCandidate = Join-Path $resolvedRustRoot $unityProjectCandidate
@@ -392,7 +423,7 @@ $unityBatchLog = Join-Path $resolvedUnityProjectRoot "Build\codex-unity-build.lo
 if (-not $SkipNativeBuild) {
     Invoke-Step `
         -Name "native-build" `
-        -Command "python scripts/ci/build_unity_plugins.py --project-root `"$resolvedRustRoot`" --platform windows --output-root `"$resolvedRustRoot\target\unity-package\windows`"" `
+        -Command "python scripts/ci/build_unity_plugins.py --public-root `"$resolvedRustRoot`" --core-root `"$resolvedCoreRoot`" --platform windows --output-root `"$resolvedRustRoot\target\unity-package\windows`"" `
         -WorkingDirectory $resolvedRustRoot `
         -LogPath $nativeLog | Out-Null
 }

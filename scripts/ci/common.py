@@ -59,8 +59,8 @@ def replace_tree(source: pathlib.Path, destination: pathlib.Path) -> None:
     shutil.copytree(source, destination)
 
 
-def copy_unity_managed_runtime(project_root: pathlib.Path, output_root: pathlib.Path) -> None:
-    source_assets_root = project_root / "UnityAVExample" / "Assets"
+def copy_unity_managed_runtime(public_root: pathlib.Path, output_root: pathlib.Path) -> None:
+    source_assets_root = public_root / "UnityAVExample" / "Assets"
     source_runtime_dir = source_assets_root / "UnityAV"
     destination_assets_root = output_root / "Assets"
     destination_runtime_dir = destination_assets_root / "UnityAV"
@@ -85,8 +85,8 @@ def copy_unity_managed_runtime(project_root: pathlib.Path, output_root: pathlib.
             copy_file(source_path, destination_path)
 
 
-def sync_unity_sample_media(project_root: pathlib.Path, unity_project: pathlib.Path) -> None:
-    source_root = project_root / "TestFiles"
+def sync_unity_sample_media(public_root: pathlib.Path, unity_project: pathlib.Path) -> None:
+    source_root = public_root / "TestFiles"
     destination_root = unity_project / "Assets" / "StreamingAssets"
     ensure_directory(destination_root)
 

@@ -1,4 +1,6 @@
 param(
+    [string]$CoreRoot = "",
+
     [Parameter(Mandatory = $true)]
     [string]$RtspUri,
 
@@ -15,6 +17,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($CoreRoot)) {
+    $CoreRoot = (Get-Location).Path
+} else {
+    $CoreRoot = (Resolve-Path $CoreRoot).Path
+}
 
 function Invoke-AudioProbe {
     param(
@@ -29,7 +36,7 @@ function Invoke-AudioProbe {
     )
 
     Write-Host "[qa-av] running audio_probe label=$Label uri=$Uri seconds=$Seconds width=$Width height=$Height"
-    $command = "cargo run --example audio_probe -- `"$Uri`" $Seconds $Width $Height 2>&1"
+    $command = "cargo run --manifest-path `"$CoreRoot\Cargo.toml`" --example audio_probe -- `"$Uri`" $Seconds $Width $Height 2>&1"
     $output = & cmd /c $command | ForEach-Object {
         "$_"
     }
