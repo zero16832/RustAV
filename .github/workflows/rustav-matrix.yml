@@ -43,12 +43,17 @@ env:
 
 jobs:
   windows-validate:
-    name: Windows Library Check
+    name: Windows Native Validate
     runs-on: windows-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -93,10 +98,82 @@ jobs:
           "$vcpkgRoot\installed\x64-windows\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "$vcpkgRoot\installed\x64-windows\tools\ffmpeg" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      - name: Cargo Check
+        shell: pwsh
+        run: |
+          cargo check --manifest-path Cargo.toml --lib --examples --locked
+
+      - name: Cargo Test
+        shell: pwsh
+        run: |
+          cargo test --manifest-path Cargo.toml --lib --tests --locked
+
+      - name: Validate CI Entrypoints
+        shell: pwsh
+        run: |
+          python scripts/ci/validate_ci_entrypoints.py
+
       - name: Build Windows Unity Plugin
         shell: pwsh
         run: |
           python scripts/ci/build_unity_plugins.py --project-root "$env:GITHUB_WORKSPACE" --platform windows --output-root "target/unity-package/windows"
+
+      - name: Cache MediaMTX
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\.ci-tools\mediamtx_v1.16.3_windows_amd64
+          key: ${{ runner.os }}-mediamtx-1.16.3
+
+      - name: Setup Validation Tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+          }
+
+          $ffmpegPath = (Get-Command ffmpeg -ErrorAction Stop).Source
+          $ffmpegEncoders = & $ffmpegPath -hide_banner -encoders
+          if (-not ($ffmpegEncoders | Select-String "libx264")) {
+            throw "ffmpeg does not provide libx264 encoder"
+          }
+
+          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE ".ci-tools"
+          $mediamtxDir = Join-Path $toolsRoot "mediamtx_v1.16.3_windows_amd64"
+          $mediamtxExe = Join-Path $mediamtxDir "mediamtx.exe"
+          if (-not (Test-Path $mediamtxExe)) {
+            New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
+            $zipPath = Join-Path $toolsRoot "mediamtx_v1.16.3_windows_amd64.zip"
+            Invoke-WebRequest -Uri "https://github.com/bluenviron/mediamtx/releases/download/v1.16.3/mediamtx_v1.16.3_windows_amd64.zip" -OutFile $zipPath
+            if (Test-Path $mediamtxDir) {
+              Remove-Item -LiteralPath $mediamtxDir -Recurse -Force
+            }
+            Expand-Archive -Path $zipPath -DestinationPath $mediamtxDir -Force
+          }
+
+          "FFMPEG_EXE=$ffmpegPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MEDIA_MTX_EXE=$mediamtxExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run Win32 Visual Validation
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/qa/run_win32_visual_validation.ps1 `
+            -RustAVRoot "$env:GITHUB_WORKSPACE" `
+            -RtspUri "rtsp://127.0.0.1:8554/mystream" `
+            -RtmpUri "rtmp://127.0.0.1:1935/mystream" `
+            -ValidationSeconds 8 `
+            -MinPlaybackSeconds 2.0 `
+            -FfmpegExe "$env:FFMPEG_EXE" `
+            -MediaMtxExe "$env:MEDIA_MTX_EXE"
+
+      - name: Upload Win32 Validation Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustav-win32-visual-validation-logs
+          path: artifacts/win32-validation
+          if-no-files-found: warn
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
@@ -104,6 +181,138 @@ jobs:
           name: rustav-windows-x86_64-unity-plugin
           path: target/unity-package/windows
           if-no-files-found: error
+
+  unity-validation-build:
+    name: Build Unity Validation Player
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    needs:
+      - windows-validate
+    env:
+      UNITY_PROJECT_PATH: UnityAVExample
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Download Windows Plugin Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rustav-windows-x86_64-unity-plugin
+          path: artifacts/windows
+
+      - name: Inject Plugins Into Unity Project
+        run: |
+          python3 scripts/ci/sync_unity_plugins_to_project.py --project-root "$GITHUB_WORKSPACE" --unity-project "$UNITY_PROJECT_PATH" --plugins-root "artifacts/windows/Assets/Plugins" --managed-runtime-root "artifacts/windows/Assets/UnityAV"
+
+      - name: Cache Unity Library
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/${{ env.UNITY_PROJECT_PATH }}/Library
+          key: ${{ runner.os }}-unity-validation-library-${{ hashFiles('UnityAVExample/Assets/**', 'UnityAVExample/Packages/manifest.json', 'UnityAVExample/ProjectSettings/**', '.github/workflows/rustav-matrix.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-unity-validation-library-
+
+      - name: Build Unity Validation Player
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          targetPlatform: StandaloneWindows64
+          projectPath: ${{ env.UNITY_PROJECT_PATH }}
+          allowDirtyBuild: true
+          buildMethod: UnityAV.Editor.CodexValidationBuild.BuildWindowsValidationPlayer
+
+      - name: Upload Unity Validation Player
+        uses: actions/upload-artifact@v4
+        with:
+          name: unity-validation-player-windows
+          path: UnityAVExample/Build/CodexPullValidation
+          if-no-files-found: error
+
+  unity-visual-validate:
+    name: Unity Visual Validate
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: windows-latest
+    needs:
+      - unity-validation-build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache MediaMTX
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\.ci-tools\mediamtx_v1.16.3_windows_amd64
+          key: ${{ runner.os }}-mediamtx-1.16.3
+
+      - name: Setup Validation Tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+          }
+
+          $ffmpegPath = (Get-Command ffmpeg -ErrorAction Stop).Source
+          $ffmpegEncoders = & $ffmpegPath -hide_banner -encoders
+          if (-not ($ffmpegEncoders | Select-String "libx264")) {
+            throw "ffmpeg does not provide libx264 encoder"
+          }
+
+          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE ".ci-tools"
+          $mediamtxDir = Join-Path $toolsRoot "mediamtx_v1.16.3_windows_amd64"
+          $mediamtxExe = Join-Path $mediamtxDir "mediamtx.exe"
+          if (-not (Test-Path $mediamtxExe)) {
+            New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
+            $zipPath = Join-Path $toolsRoot "mediamtx_v1.16.3_windows_amd64.zip"
+            Invoke-WebRequest -Uri "https://github.com/bluenviron/mediamtx/releases/download/v1.16.3/mediamtx_v1.16.3_windows_amd64.zip" -OutFile $zipPath
+            if (Test-Path $mediamtxDir) {
+              Remove-Item -LiteralPath $mediamtxDir -Recurse -Force
+            }
+            Expand-Archive -Path $zipPath -DestinationPath $mediamtxDir -Force
+          }
+
+          "FFMPEG_EXE=$ffmpegPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MEDIA_MTX_EXE=$mediamtxExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Download Unity Validation Player
+        uses: actions/download-artifact@v4
+        with:
+          name: unity-validation-player-windows
+          path: UnityAVExample/Build/CodexPullValidation
+
+      - name: Run Unity Visual Validation
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/qa/run_unity_visual_validation.ps1 `
+            -RustAVRoot "$env:GITHUB_WORKSPACE" `
+            -UnityProjectRoot "UnityAVExample" `
+            -ValidationPlayerExe "$env:GITHUB_WORKSPACE\UnityAVExample\Build\CodexPullValidation\CodexPullValidation.exe" `
+            -RtspUri "rtsp://127.0.0.1:8554/mystream" `
+            -RtmpUri "rtmp://127.0.0.1:1935/mystream" `
+            -ValidationSeconds 8 `
+            -MinPlaybackSeconds 2.0 `
+            -AvSyncThresholdMs 200 `
+            -FfmpegExe "$env:FFMPEG_EXE" `
+            -MediaMtxExe "$env:MEDIA_MTX_EXE"
+
+      - name: Upload Unity Validation Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustav-unity-visual-validation-logs
+          path: artifacts/unity-validation
+          if-no-files-found: warn
 
   android-build:
     name: Android arm64 Build

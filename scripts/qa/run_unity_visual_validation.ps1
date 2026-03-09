@@ -1,6 +1,12 @@
 param(
     [string]$RustAVRoot = "D:\TestProject\Video\RustAV",
 
+    [string]$UnityProjectRoot = "UnityAVExample",
+
+    [string]$UnityExe = "C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe",
+
+    [string]$ValidationPlayerExe = "",
+
     [string]$RtspUri = "rtsp://127.0.0.1:8554/mystream",
 
     [string]$RtmpUri = "rtmp://127.0.0.1:1935/mystream",
@@ -11,11 +17,25 @@ param(
 
     [double]$MinPlaybackSeconds = 2.0,
 
+    [int]$WindowWidth = 0,
+
+    [int]$WindowHeight = 0,
+
+    [double]$AvSyncThresholdMs = 200,
+
+    [int]$AvSyncWarmupSampleCount = 0,
+
     [string]$FfmpegExe = "C:\Users\HP\Downloads\mediamtx_v1.16.3_windows_amd64\ffmpeg.exe",
 
     [string]$MediaMtxExe = "",
 
-    [string]$LogDir = "artifacts\win32-validation"
+    [string]$LogDir = "artifacts\unity-validation",
+
+    [switch]$SkipNativeBuild,
+
+    [switch]$SkipPluginSync,
+
+    [switch]$SkipUnityBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,7 +63,7 @@ function Resolve-ToolPath {
         return $command.Source
     }
 
-    throw "[win32-qa] $ToolName not found: $Value"
+    throw "[unity-visual-qa] $ToolName not found: $Value"
 }
 
 function Wait-ForTcpPort {
@@ -75,7 +95,7 @@ function Wait-ForTcpPort {
         Start-Sleep -Milliseconds 500
     }
 
-    throw "[win32-qa] timeout waiting for $($Host):$Port"
+    throw "[unity-visual-qa] timeout waiting for $($Host):$Port"
 }
 
 function Start-MediaMtxServer {
@@ -103,59 +123,11 @@ function Start-MediaMtxServer {
     return $process
 }
 
-function Invoke-PlayerValidation {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$RustRoot,
-
-        [Parameter(Mandatory = $true)]
-        [string]$CaseName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$LogPath,
-
-        [Parameter(Mandatory = $false)]
-        [string]$Uri = "",
-
-        [switch]$RequireAudio
-    )
-
-    $command = @(
-        "cargo run --manifest-path `"$RustRoot\Cargo.toml`" --example test_player --",
-        "--max-seconds=$ValidationSeconds",
-        "--min-playback-seconds=$MinPlaybackSeconds",
-        "--validate"
-    )
-
-    if (-not [string]::IsNullOrWhiteSpace($Uri)) {
-        $command += "--uri=`"$Uri`""
-    }
-
-    if ($RequireAudio) {
-        $command += "--require-audio"
-    }
-
-    $fullCommand = ($command -join " ") + " 2>&1"
-    Write-Host "[win32-qa] running $CaseName"
-    Write-Host "[win32-qa] cmd=$fullCommand"
-
-    $output = & cmd /c $fullCommand | ForEach-Object { "$_" }
-    $output | Tee-Object -FilePath $LogPath | Out-Null
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "[win32-qa] $CaseName failed"
-    }
-
-    $summary = $output | Select-String "\[test_player summary\]" | Select-Object -Last 1
-    if (-not $summary) {
-        throw "[win32-qa] $CaseName missing summary"
-    }
-
-    return $summary.Line.Trim()
-}
-
 function Start-FfmpegPublisher {
     param(
+        [Parameter(Mandatory = $true)]
+        [string]$ExecutablePath,
+
         [Parameter(Mandatory = $true)]
         [string]$Protocol,
 
@@ -206,14 +178,16 @@ function Start-FfmpegPublisher {
             "-muxpreload", "0",
             $Uri
         )
-    } elseif ($Protocol -eq "rtmp") {
+    }
+    elseif ($Protocol -eq "rtmp") {
         $args += @("-f", "flv", $Uri)
-    } else {
-        throw "[win32-qa] unsupported protocol: $Protocol"
+    }
+    else {
+        throw "[unity-visual-qa] unsupported protocol: $Protocol"
     }
 
     $process = Start-Process `
-        -FilePath $script:ResolvedFfmpegExe `
+        -FilePath $ExecutablePath `
         -ArgumentList $args `
         -RedirectStandardOutput $StdOutLog `
         -RedirectStandardError $StdErrLog `
@@ -222,13 +196,13 @@ function Start-FfmpegPublisher {
 
     Start-Sleep -Seconds 2
     if ($process.HasExited) {
-        throw "[win32-qa] $Protocol publisher exited early"
+        throw "[unity-visual-qa] $Protocol publisher exited early"
     }
 
     return $process
 }
 
-function Stop-FfmpegPublisher {
+function Stop-BackgroundProcess {
     param(
         [Parameter(Mandatory = $false)]
         [System.Diagnostics.Process]$Process
@@ -254,15 +228,12 @@ $resolvedVideoPath = (Resolve-Path $resolvedVideoPath).Path
 $resolvedLogDir = Join-Path $resolvedRustRoot $LogDir
 New-Item -ItemType Directory -Force -Path $resolvedLogDir | Out-Null
 
-$script:ResolvedFfmpegExe = Resolve-ToolPath -Value $FfmpegExe -ToolName "ffmpeg"
+$resolvedFfmpegExe = Resolve-ToolPath -Value $FfmpegExe -ToolName "ffmpeg"
 $resolvedMediaMtxExe = ""
 if (-not [string]::IsNullOrWhiteSpace($MediaMtxExe)) {
     $resolvedMediaMtxExe = Resolve-ToolPath -Value $MediaMtxExe -ToolName "mediamtx"
 }
 
-$fileLog = Join-Path $resolvedLogDir "file.log"
-$rtspLog = Join-Path $resolvedLogDir "rtsp.log"
-$rtmpLog = Join-Path $resolvedLogDir "rtmp.log"
 $mediamtxOut = Join-Path $resolvedLogDir "mediamtx.out.log"
 $mediamtxErr = Join-Path $resolvedLogDir "mediamtx.err.log"
 $rtspPublisherOut = Join-Path $resolvedLogDir "rtsp-publisher.out.log"
@@ -273,7 +244,7 @@ $rtmpPublisherErr = Join-Path $resolvedLogDir "rtmp-publisher.err.log"
 $mediamtxProcess = $null
 $rtspPublisher = $null
 $rtmpPublisher = $null
-$summaries = @()
+
 try {
     if (-not [string]::IsNullOrWhiteSpace($resolvedMediaMtxExe)) {
         $mediamtxProcess = Start-MediaMtxServer `
@@ -282,50 +253,77 @@ try {
             -StdErrLog $mediamtxErr
     }
 
-    $summaries += Invoke-PlayerValidation `
-        -RustRoot $resolvedRustRoot `
-        -CaseName "file" `
-        -LogPath $fileLog `
-        -Uri $resolvedVideoPath `
-        -RequireAudio
-
     $rtspPublisher = Start-FfmpegPublisher `
+        -ExecutablePath $resolvedFfmpegExe `
         -Protocol "rtsp" `
         -InputPath $resolvedVideoPath `
         -Uri $RtspUri `
         -StdOutLog $rtspPublisherOut `
         -StdErrLog $rtspPublisherErr
-    $summaries += Invoke-PlayerValidation `
-        -RustRoot $resolvedRustRoot `
-        -CaseName "rtsp" `
-        -LogPath $rtspLog `
-        -Uri $RtspUri `
-        -RequireAudio
-
-    Stop-FfmpegPublisher -Process $rtspPublisher
-    $rtspPublisher = $null
 
     $rtmpPublisher = Start-FfmpegPublisher `
+        -ExecutablePath $resolvedFfmpegExe `
         -Protocol "rtmp" `
         -InputPath $resolvedVideoPath `
         -Uri $RtmpUri `
         -StdOutLog $rtmpPublisherOut `
         -StdErrLog $rtmpPublisherErr
-    $summaries += Invoke-PlayerValidation `
-        -RustRoot $resolvedRustRoot `
-        -CaseName "rtmp" `
-        -LogPath $rtmpLog `
-        -Uri $RtmpUri `
-        -RequireAudio
-}
-finally {
-    Stop-FfmpegPublisher -Process $rtspPublisher
-    Stop-FfmpegPublisher -Process $rtmpPublisher
-    if ($null -ne $mediamtxProcess -and -not $mediamtxProcess.HasExited) {
-        Stop-Process -Id $mediamtxProcess.Id -Force
+
+    $scriptArgs = @(
+        "-ExecutionPolicy", "Bypass",
+        "-File", (Join-Path $resolvedRustRoot "scripts\qa\run_unity_validation.ps1"),
+        "-RustAVRoot", $resolvedRustRoot,
+        "-UnityProjectRoot", $UnityProjectRoot,
+        "-RtspUri", $RtspUri,
+        "-RtmpUri", $RtmpUri,
+        "-ValidationSeconds", $ValidationSeconds,
+        "-MinPlaybackSeconds", $MinPlaybackSeconds,
+        "-AvSyncThresholdMs", $AvSyncThresholdMs,
+        "-AvSyncWarmupSampleCount", $AvSyncWarmupSampleCount,
+        "-LogDir", $LogDir,
+        "-RequireAudioPlayback",
+        "-FailOnAvSyncThresholdExceeded"
+    )
+
+    if ($WindowWidth -gt 0) {
+        $scriptArgs += @("-WindowWidth", $WindowWidth)
+    }
+
+    if ($WindowHeight -gt 0) {
+        $scriptArgs += @("-WindowHeight", $WindowHeight)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ValidationPlayerExe)) {
+        $scriptArgs += @(
+            "-ValidationPlayerExe", $ValidationPlayerExe,
+            "-SkipNativeBuild",
+            "-SkipPluginSync",
+            "-SkipUnityBuild"
+        )
+    }
+    else {
+        $scriptArgs += @("-UnityExe", $UnityExe)
+
+        if ($SkipNativeBuild) {
+            $scriptArgs += "-SkipNativeBuild"
+        }
+
+        if ($SkipPluginSync) {
+            $scriptArgs += "-SkipPluginSync"
+        }
+
+        if ($SkipUnityBuild) {
+            $scriptArgs += "-SkipUnityBuild"
+        }
+    }
+
+    & powershell @scriptArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "[unity-visual-qa] run_unity_validation failed"
     }
 }
-
-Write-Host ""
-Write-Host "[win32-qa] summary"
-$summaries | ForEach-Object { Write-Host $_ }
+finally {
+    Stop-BackgroundProcess -Process $rtspPublisher
+    Stop-BackgroundProcess -Process $rtmpPublisher
+    Stop-BackgroundProcess -Process $mediamtxProcess
+}

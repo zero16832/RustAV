@@ -5,6 +5,8 @@ param(
 
     [string]$UnityExe = "C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe",
 
+    [string]$ValidationPlayerExe = "",
+
     [string]$RtspUri = "",
 
     [string]$RtmpUri = "",
@@ -26,6 +28,8 @@ param(
     [switch]$RequireAudioPlayback,
 
     [switch]$SkipNativeBuild,
+
+    [switch]$SkipPluginSync,
 
     [switch]$SkipUnityBuild,
 
@@ -352,8 +356,17 @@ if (-not [System.IO.Path]::IsPathRooted($unityProjectCandidate)) {
     $unityProjectCandidate = Join-Path $resolvedRustRoot $unityProjectCandidate
 }
 $resolvedUnityProjectRoot = (Resolve-Path $unityProjectCandidate).Path
-$resolvedUnityExe = (Resolve-Path $UnityExe).Path
 $resolvedLogDir = Join-Path $resolvedRustRoot $LogDir
+$resolvedUnityExe = ""
+$resolvedValidationPlayerExe = ""
+
+if (-not [string]::IsNullOrWhiteSpace($ValidationPlayerExe)) {
+    $resolvedValidationPlayerExe = (Resolve-Path $ValidationPlayerExe).Path
+}
+
+if (-not $SkipUnityBuild -and [string]::IsNullOrWhiteSpace($resolvedValidationPlayerExe)) {
+    $resolvedUnityExe = (Resolve-Path $UnityExe).Path
+}
 
 New-Item -ItemType Directory -Force -Path $resolvedLogDir | Out-Null
 
@@ -369,9 +382,11 @@ if (-not $SkipNativeBuild) {
         -LogPath $nativeLog | Out-Null
 }
 
-Sync-UnityPlugins `
-    -RustRoot $resolvedRustRoot `
-    -UnityProject $resolvedUnityProjectRoot
+if (-not $SkipPluginSync) {
+    Sync-UnityPlugins `
+        -RustRoot $resolvedRustRoot `
+        -UnityProject $resolvedUnityProjectRoot
+}
 
 if (-not $SkipUnityBuild) {
     Invoke-Step `
@@ -381,7 +396,10 @@ if (-not $SkipUnityBuild) {
         -LogPath $buildLog | Out-Null
 }
 
-$playerExe = Join-Path $resolvedUnityProjectRoot "Build\CodexPullValidation\CodexPullValidation.exe"
+$playerExe = $resolvedValidationPlayerExe
+if ([string]::IsNullOrWhiteSpace($playerExe)) {
+    $playerExe = Join-Path $resolvedUnityProjectRoot "Build\CodexPullValidation\CodexPullValidation.exe"
+}
 if (-not (Test-Path $playerExe)) {
     throw "[unity-qa] player exe not found: $playerExe"
 }
