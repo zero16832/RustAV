@@ -4,14 +4,12 @@ on:
   push:
     paths:
       - '.github/workflows/rustav-matrix.yml'
-      - 'scripts/**'
       - 'include/**'
       - 'TestFiles/**'
       - 'UnityAVExample/**'
   pull_request:
     paths:
       - '.github/workflows/rustav-matrix.yml'
-      - 'scripts/**'
       - 'include/**'
       - 'TestFiles/**'
       - 'UnityAVExample/**'
@@ -157,12 +155,12 @@ jobs:
       - name: Validate CI Entrypoints
         shell: pwsh
         run: |
-          python scripts/ci/validate_ci_entrypoints.py --public-root "$env:GITHUB_WORKSPACE" --core-root "$env:GITHUB_WORKSPACE\RustAV-Core"
+          python "$env:GITHUB_WORKSPACE\RustAV-Core\scripts\ci\validate_ci_entrypoints.py" --public-root "$env:GITHUB_WORKSPACE" --core-root "$env:GITHUB_WORKSPACE\RustAV-Core"
 
       - name: Build Windows Unity Plugin
         shell: pwsh
         run: |
-          python scripts/ci/build_unity_plugins.py --public-root "$env:GITHUB_WORKSPACE" --core-root "$env:GITHUB_WORKSPACE\RustAV-Core" --platform windows --output-root 'target/unity-package/windows'
+          python "$env:GITHUB_WORKSPACE\RustAV-Core\scripts\ci\build_unity_plugins.py" --public-root "$env:GITHUB_WORKSPACE" --core-root "$env:GITHUB_WORKSPACE\RustAV-Core" --platform windows --output-root 'target/unity-package/windows'
 
       - name: Cache MediaMTX
         uses: actions/cache@v4
@@ -242,6 +240,62 @@ jobs:
       - name: Checkout public repo
         uses: actions/checkout@v4
 
+      - name: Resolve core ref
+        id: core-ref
+        shell: pwsh
+        run: |
+          $coreRef = "${{ github.event.inputs.core_ref }}"
+          if ([string]::IsNullOrWhiteSpace($coreRef)) {
+            $coreRef = 'main'
+          }
+          "core_ref=$coreRef" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Resolve RustAV-Core auth mode
+        id: core-auth
+        shell: pwsh
+        run: |
+          $hasApp = (-not [string]::IsNullOrWhiteSpace("${{ vars.RUSTAV_CORE_APP_ID }}")) -and (-not [string]::IsNullOrWhiteSpace("${{ secrets.RUSTAV_CORE_APP_PRIVATE_KEY }}"))
+          $hasPat = -not [string]::IsNullOrWhiteSpace("${{ secrets.RUSTAV_CORE_CLONE_TOKEN }}")
+          if (-not $hasApp -and -not $hasPat) {
+            throw 'Configure vars.RUSTAV_CORE_APP_ID + secrets.RUSTAV_CORE_APP_PRIVATE_KEY, or secrets.RUSTAV_CORE_CLONE_TOKEN.'
+          }
+          if ($hasApp) {
+            'mode=app' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            'mode=pat' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+
+      - name: Create RustAV-Core app token
+        if: ${{ steps.core-auth.outputs.mode == 'app' }}
+        id: core-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RUSTAV_CORE_APP_ID }}
+          private-key: ${{ secrets.RUSTAV_CORE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            RustAV-Core
+
+      - name: Checkout RustAV-Core with app token
+        if: ${{ steps.core-auth.outputs.mode == 'app' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: ${{ steps.core-ref.outputs.core_ref }}
+          path: RustAV-Core
+          token: ${{ steps.core-app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Checkout RustAV-Core with PAT
+        if: ${{ steps.core-auth.outputs.mode == 'pat' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: ${{ steps.core-ref.outputs.core_ref }}
+          path: RustAV-Core
+          token: ${{ secrets.RUSTAV_CORE_CLONE_TOKEN }}
+          persist-credentials: false
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -255,7 +309,7 @@ jobs:
 
       - name: Inject Plugins Into Unity Project
         run: |
-          python3 scripts/ci/sync_unity_plugins_to_project.py --public-root "$GITHUB_WORKSPACE" --unity-project "$UNITY_PROJECT_PATH" --plugins-root 'artifacts/windows/Assets/Plugins' --managed-runtime-root 'artifacts/windows/Assets/UnityAV'
+          python3 "$GITHUB_WORKSPACE/RustAV-Core/scripts/ci/sync_unity_plugins_to_project.py" --public-root "$GITHUB_WORKSPACE" --unity-project "$UNITY_PROJECT_PATH" --plugins-root 'artifacts/windows/Assets/Plugins' --managed-runtime-root 'artifacts/windows/Assets/UnityAV'
 
       - name: Cache Unity Library
         uses: actions/cache@v4
@@ -523,7 +577,7 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          python3 scripts/ci/build_unity_plugins.py --public-root "$GITHUB_WORKSPACE" --core-root "$GITHUB_WORKSPACE/RustAV-Core" --platform android --output-root 'target/unity-package/android' --cargo-ndk-output 'target/android-unity-libs' --abi arm64-v8a
+          python3 "$GITHUB_WORKSPACE/RustAV-Core/scripts/ci/build_unity_plugins.py" --public-root "$GITHUB_WORKSPACE" --core-root "$GITHUB_WORKSPACE/RustAV-Core" --platform android --output-root 'target/unity-package/android' --cargo-ndk-output 'target/android-unity-libs' --abi arm64-v8a
 
       - name: Upload Android Artifact
         uses: actions/upload-artifact@v4
@@ -622,7 +676,7 @@ jobs:
 
       - name: Build iOS Unity Plugin
         run: |
-          python3 scripts/ci/build_unity_plugins.py --public-root "$GITHUB_WORKSPACE" --core-root "$GITHUB_WORKSPACE/RustAV-Core" --platform ios --manifest-path 'ios-staticlib/Cargo.toml' --target-dir 'target/ios-staticlib' --output-root 'target/unity-package/ios' --xcframework-output 'target/apple-unity/RustAV.xcframework'
+          python3 "$GITHUB_WORKSPACE/RustAV-Core/scripts/ci/build_unity_plugins.py" --public-root "$GITHUB_WORKSPACE" --core-root "$GITHUB_WORKSPACE/RustAV-Core" --platform ios --manifest-path 'ios-staticlib/Cargo.toml' --target-dir 'target/ios-staticlib' --output-root 'target/unity-package/ios' --xcframework-output 'target/apple-unity/RustAV.xcframework'
 
       - name: Upload iOS Artifact
         uses: actions/upload-artifact@v4
@@ -644,6 +698,62 @@ jobs:
       - name: Checkout public repo
         uses: actions/checkout@v4
 
+      - name: Resolve core ref
+        id: core-ref
+        shell: pwsh
+        run: |
+          $coreRef = "${{ github.event.inputs.core_ref }}"
+          if ([string]::IsNullOrWhiteSpace($coreRef)) {
+            $coreRef = 'main'
+          }
+          "core_ref=$coreRef" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Resolve RustAV-Core auth mode
+        id: core-auth
+        shell: pwsh
+        run: |
+          $hasApp = (-not [string]::IsNullOrWhiteSpace("${{ vars.RUSTAV_CORE_APP_ID }}")) -and (-not [string]::IsNullOrWhiteSpace("${{ secrets.RUSTAV_CORE_APP_PRIVATE_KEY }}"))
+          $hasPat = -not [string]::IsNullOrWhiteSpace("${{ secrets.RUSTAV_CORE_CLONE_TOKEN }}")
+          if (-not $hasApp -and -not $hasPat) {
+            throw 'Configure vars.RUSTAV_CORE_APP_ID + secrets.RUSTAV_CORE_APP_PRIVATE_KEY, or secrets.RUSTAV_CORE_CLONE_TOKEN.'
+          }
+          if ($hasApp) {
+            'mode=app' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            'mode=pat' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+
+      - name: Create RustAV-Core app token
+        if: ${{ steps.core-auth.outputs.mode == 'app' }}
+        id: core-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RUSTAV_CORE_APP_ID }}
+          private-key: ${{ secrets.RUSTAV_CORE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            RustAV-Core
+
+      - name: Checkout RustAV-Core with app token
+        if: ${{ steps.core-auth.outputs.mode == 'app' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: ${{ steps.core-ref.outputs.core_ref }}
+          path: RustAV-Core
+          token: ${{ steps.core-app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Checkout RustAV-Core with PAT
+        if: ${{ steps.core-auth.outputs.mode == 'pat' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: ${{ steps.core-ref.outputs.core_ref }}
+          path: RustAV-Core
+          token: ${{ secrets.RUSTAV_CORE_CLONE_TOKEN }}
+          persist-credentials: false
+
       - name: Download Windows Artifact
         uses: actions/download-artifact@v4
         with:
@@ -664,7 +774,7 @@ jobs:
 
       - name: Assemble Unity Plugins Bundle
         run: |
-          python3 scripts/ci/build_unity_plugins.py --public-root "$GITHUB_WORKSPACE" --platform package --windows-artifact 'artifacts/windows' --android-artifact 'artifacts/android' --ios-artifact 'artifacts/ios' --bundle-root 'UnityPlugins' --zip-output 'RustAV-UnityPlugins.zip'
+          python3 "$GITHUB_WORKSPACE/RustAV-Core/scripts/ci/build_unity_plugins.py" --public-root "$GITHUB_WORKSPACE" --platform package --windows-artifact 'artifacts/windows' --android-artifact 'artifacts/android' --ios-artifact 'artifacts/ios' --bundle-root 'UnityPlugins' --zip-output 'RustAV-UnityPlugins.zip'
 
       - name: Upload Unity Plugins Bundle
         uses: actions/upload-artifact@v4

@@ -11,7 +11,7 @@
 /_tmp_ios_manifest_test/
 /ios-staticlib/
 /ios-staticlib/target/
-/scripts/ci/__pycache__/
+/scripts/
 *.pyc
 fix_*.py
 inject_*.py
