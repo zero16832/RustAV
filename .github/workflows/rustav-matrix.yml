@@ -204,7 +204,7 @@ jobs:
       - name: Run Win32 Visual Validation
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/qa/run_win32_visual_validation.ps1 `
+          powershell -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\RustAV-Core\scripts\qa\run_win32_visual_validation.ps1" `
             -RustAVRoot "$env:GITHUB_WORKSPACE" `
             -CoreRoot "$env:GITHUB_WORKSPACE\RustAV-Core" `
             -RtspUri 'rtsp://127.0.0.1:8554/mystream' `
@@ -295,6 +295,62 @@ jobs:
       - name: Checkout public repo
         uses: actions/checkout@v4
 
+      - name: Resolve core ref
+        id: core-ref
+        shell: pwsh
+        run: |
+          $coreRef = "${{ github.event.inputs.core_ref }}"
+          if ([string]::IsNullOrWhiteSpace($coreRef)) {
+            $coreRef = 'main'
+          }
+          "core_ref=$coreRef" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Resolve RustAV-Core auth mode
+        id: core-auth
+        shell: pwsh
+        run: |
+          $hasApp = (-not [string]::IsNullOrWhiteSpace("${{ vars.RUSTAV_CORE_APP_ID }}")) -and (-not [string]::IsNullOrWhiteSpace("${{ secrets.RUSTAV_CORE_APP_PRIVATE_KEY }}"))
+          $hasPat = -not [string]::IsNullOrWhiteSpace("${{ secrets.RUSTAV_CORE_CLONE_TOKEN }}")
+          if (-not $hasApp -and -not $hasPat) {
+            throw 'Configure vars.RUSTAV_CORE_APP_ID + secrets.RUSTAV_CORE_APP_PRIVATE_KEY, or secrets.RUSTAV_CORE_CLONE_TOKEN.'
+          }
+          if ($hasApp) {
+            'mode=app' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            'mode=pat' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+
+      - name: Create RustAV-Core app token
+        if: ${{ steps.core-auth.outputs.mode == 'app' }}
+        id: core-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RUSTAV_CORE_APP_ID }}
+          private-key: ${{ secrets.RUSTAV_CORE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            RustAV-Core
+
+      - name: Checkout RustAV-Core with app token
+        if: ${{ steps.core-auth.outputs.mode == 'app' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: ${{ steps.core-ref.outputs.core_ref }}
+          path: RustAV-Core
+          token: ${{ steps.core-app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Checkout RustAV-Core with PAT
+        if: ${{ steps.core-auth.outputs.mode == 'pat' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: ${{ steps.core-ref.outputs.core_ref }}
+          path: RustAV-Core
+          token: ${{ secrets.RUSTAV_CORE_CLONE_TOKEN }}
+          persist-credentials: false
+
       - name: Cache MediaMTX
         uses: actions/cache@v4
         with:
@@ -341,8 +397,9 @@ jobs:
       - name: Run Unity Visual Validation
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/qa/run_unity_visual_validation.ps1 `
+          powershell -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\RustAV-Core\scripts\qa\run_unity_visual_validation.ps1" `
             -RustAVRoot "$env:GITHUB_WORKSPACE" `
+            -CoreRoot "$env:GITHUB_WORKSPACE\RustAV-Core" `
             -ValidationPlayerExe "$env:GITHUB_WORKSPACE\UnityAVExample\Build\CodexPullValidation\CodexPullValidation.exe" `
             -RtspUri 'rtsp://127.0.0.1:8554/mystream' `
             -RtmpUri 'rtmp://127.0.0.1:1935/mystream' `

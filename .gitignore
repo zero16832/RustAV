@@ -9,6 +9,7 @@
 /flat-release-assets/
 /release-manifest.json
 /_tmp_ios_manifest_test/
+/ios-staticlib/
 /ios-staticlib/target/
 /scripts/ci/__pycache__/
 *.pyc
