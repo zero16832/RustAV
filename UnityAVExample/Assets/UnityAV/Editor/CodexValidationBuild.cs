@@ -1,4 +1,9 @@
+using System;
+using System.Collections.Generic;
 using System.IO;
+using Process = System.Diagnostics.Process;
+using System.Text;
+using System.Threading;
 using UnityEditor;
 using UnityEditor.Build.Reporting;
 using UnityEditor.SceneManagement;
@@ -17,6 +22,9 @@ namespace UnityAV.Editor
         private const string SampleUri = "SampleVideo_1280x720_10mb.mp4";
         private const int DefaultVideoWidth = 1280;
         private const int DefaultVideoHeight = 720;
+        private const int BuildOutputDeleteRetryCount = 10;
+        private const int BuildOutputDeleteRetryDelayMs = 500;
+        private const int BuildOutputLockContextLimit = 5;
 
         public static void CreatePullValidationScene()
         {
@@ -162,14 +170,212 @@ namespace UnityAV.Editor
 
         private static void PrepareBuildOutput(string buildPath)
         {
-            var buildDirectory = Path.GetDirectoryName(buildPath);
-            if (!string.IsNullOrWhiteSpace(buildDirectory)
-                && Directory.Exists(buildDirectory))
+            StopRunningValidationPlayer(buildPath);
+
+            var buildDirectory = Path.GetDirectoryName(buildPath) ?? "Build/CodexPullValidation";
+            DeleteDirectoryWithRetries(buildDirectory);
+
+            Directory.CreateDirectory(buildDirectory);
+        }
+
+        private static void StopRunningValidationPlayer(string buildPath)
+        {
+            var exePath = Path.GetFullPath(buildPath);
+            var processName = Path.GetFileNameWithoutExtension(exePath);
+            foreach (var process in Process.GetProcessesByName(processName))
             {
-                Directory.Delete(buildDirectory, true);
+                try
+                {
+                    var processPath = process.MainModule?.FileName ?? string.Empty;
+                    if (!string.Equals(processPath, exePath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                }
+                catch
+                {
+                    // 无法读取路径时保守处理，直接继续尝试退出。
+                }
+
+                try
+                {
+                    process.Kill();
+                    process.WaitForExit(5000);
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private static void DeleteDirectoryWithRetries(string path)
+        {
+            if (!Directory.Exists(path))
+            {
+                return;
             }
 
-            Directory.CreateDirectory(buildDirectory ?? "Build/CodexPullValidation");
+            Exception lastException = null;
+            for (var attempt = 1; attempt <= BuildOutputDeleteRetryCount; attempt++)
+            {
+                try
+                {
+                    Directory.Delete(path, true);
+                    return;
+                }
+                catch (IOException ex)
+                {
+                    lastException = ex;
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    lastException = ex;
+                }
+
+                if (!Directory.Exists(path))
+                {
+                    return;
+                }
+
+                if (attempt < BuildOutputDeleteRetryCount)
+                {
+                    Debug.LogWarning(
+                        $"[CodexValidationBuild] build_output_delete_retry path={path} attempt={attempt}/{BuildOutputDeleteRetryCount} reason={lastException?.GetType().Name}: {lastException?.Message}");
+                    Thread.Sleep(BuildOutputDeleteRetryDelayMs);
+                }
+            }
+
+            var failureMessage = BuildOutputDeleteFailureMessage(path, lastException);
+            if (lastException is UnauthorizedAccessException)
+            {
+                throw new UnauthorizedAccessException(failureMessage, lastException);
+            }
+
+            throw new IOException(failureMessage, lastException);
+        }
+
+        private static string BuildOutputDeleteFailureMessage(string path, Exception lastException)
+        {
+            var builder = new StringBuilder();
+            builder.Append("删除构建输出目录失败：");
+            builder.Append(path);
+            builder.Append("。已重试 ");
+            builder.Append(BuildOutputDeleteRetryCount);
+            builder.Append(" 次，每次等待 ");
+            builder.Append(BuildOutputDeleteRetryDelayMs);
+            builder.Append("ms。");
+
+            if (lastException != null)
+            {
+                builder.Append("最后一次异常=");
+                builder.Append(lastException.GetType().Name);
+                builder.Append(": ");
+                builder.Append(lastException.Message);
+                builder.Append("。");
+            }
+
+            builder.Append(BuildOutputLockContext(path));
+            return builder.ToString();
+        }
+
+        private static string BuildOutputLockContext(string path)
+        {
+            var builder = new StringBuilder();
+            builder.Append(" 可能的文件锁上下文：");
+
+            if (!Directory.Exists(path))
+            {
+                builder.Append("重试结束后目录已不存在，可能是外部进程在最后一次重试后完成了释放。");
+                return builder.ToString();
+            }
+
+            var blockedFiles = new List<string>();
+            try
+            {
+                foreach (var filePath in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                {
+                    var blockedFile = TryDescribeBlockedFile(filePath);
+                    if (string.IsNullOrEmpty(blockedFile))
+                    {
+                        continue;
+                    }
+
+                    blockedFiles.Add(blockedFile);
+                    if (blockedFiles.Count >= BuildOutputLockContextLimit)
+                    {
+                        break;
+                    }
+                }
+            }
+            catch (IOException ex)
+            {
+                builder.Append("扫描目录时遇到 IOException: ");
+                builder.Append(ex.Message);
+                builder.Append("。");
+                return builder.ToString();
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                builder.Append("扫描目录时遇到 UnauthorizedAccessException: ");
+                builder.Append(ex.Message);
+                builder.Append("。");
+                return builder.ToString();
+            }
+
+            if (blockedFiles.Count == 0)
+            {
+                builder.Append("未定位到明确的被占用文件，可能是目录句柄、杀毒扫描或外部进程仍持有该目录。");
+                return builder.ToString();
+            }
+
+            builder.Append("疑似仍被占用的文件=");
+            builder.Append(string.Join(" | ", blockedFiles));
+            return builder.ToString();
+        }
+
+        private static string TryDescribeBlockedFile(string filePath)
+        {
+            try
+            {
+                using (File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                }
+
+                return null;
+            }
+            catch (FileNotFoundException)
+            {
+                return null;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return null;
+            }
+            catch (IOException ex)
+            {
+                return BuildBlockedFileDescription(filePath, ex);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return BuildBlockedFileDescription(filePath, ex);
+            }
+        }
+
+        private static string BuildBlockedFileDescription(string filePath, Exception ex)
+        {
+            try
+            {
+                var fileInfo = new FileInfo(filePath);
+                return $"{filePath} ({ex.GetType().Name}: {ex.Message}; size={fileInfo.Length}; lastWriteUtc={fileInfo.LastWriteTimeUtc:O})";
+            }
+            catch (IOException)
+            {
+                return $"{filePath} ({ex.GetType().Name}: {ex.Message}; metadata=unavailable)";
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return $"{filePath} ({ex.GetType().Name}: {ex.Message}; metadata=unavailable)";
+            }
         }
     }
 }

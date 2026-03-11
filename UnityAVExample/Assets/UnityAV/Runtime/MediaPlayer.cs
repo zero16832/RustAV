@@ -1,5 +1,5 @@
 using System;
-using System.IO;
+using System.Collections;
 using System.Runtime.InteropServices;
 using System.Text;
 using UnityEngine;
@@ -11,61 +11,9 @@ namespace UnityAV
     /// </summary>
     public class MediaPlayer : MonoBehaviour
     {
-        private const string RTSPPrefix = "rtsp://";
-        private const string RTMPPrefix = "rtmp://";
-
         private const int DefaultWidth = 1024;
         private const int DefaultHeight = 1024;
         private const int InvalidPlayerId = -1;
-        private const uint RustAVPlayerOpenOptionsVersion = 1u;
-        private const uint RustAVPlayerHealthSnapshotV2Version = 2u;
-        private const int BackendDiagnosticBufferLength = 512;
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct RustAVPlayerOpenOptions
-        {
-            public uint StructSize;
-            public uint StructVersion;
-            public int BackendKind;
-            public int StrictBackend;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct RustAVPlayerHealthSnapshotV2
-        {
-            public uint StructSize;
-            public uint StructVersion;
-            public int State;
-            public int RuntimeState;
-            public int PlaybackIntent;
-            public int StopReason;
-            public int SourceConnectionState;
-            public int IsConnected;
-            public int IsPlaying;
-            public int IsRealtime;
-            public int CanSeek;
-            public int IsLooping;
-            public int StreamCount;
-            public int VideoDecoderCount;
-            public int HasAudioDecoder;
-            public double DurationSec;
-            public double CurrentTimeSec;
-            public double ExternalTimeSec;
-            public double AudioTimeSec;
-            public double AudioPresentedTimeSec;
-            public double AudioSinkDelaySec;
-            public double VideoSyncCompensationSec;
-            public long ConnectAttemptCount;
-            public long VideoDecoderRecreateCount;
-            public long AudioDecoderRecreateCount;
-            public long VideoFrameDropCount;
-            public long AudioFrameDropCount;
-            public long SourcePacketCount;
-            public long SourceTimeoutCount;
-            public long SourceReconnectCount;
-            public int SourceIsCheckingConnection;
-            public double SourceLastActivityAgeSec;
-        }
 
         public struct PlayerRuntimeHealth
         {
@@ -135,33 +83,6 @@ namespace UnityAV
             get { return _actualBackendKind; }
         }
 
-        private static bool IsRemoteUri(string uri)
-        {
-            if (string.IsNullOrEmpty(uri))
-            {
-                return false;
-            }
-
-            return uri.StartsWith(RTSPPrefix, StringComparison.OrdinalIgnoreCase)
-                || uri.StartsWith(RTMPPrefix, StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static string ResolveUri(string uri)
-        {
-            if (IsRemoteUri(uri))
-            {
-                return string.Copy(uri);
-            }
-
-            var path = Application.streamingAssetsPath + Path.DirectorySeparatorChar + uri;
-            if (!File.Exists(path))
-            {
-                throw new FileNotFoundException(path + " not found.");
-            }
-
-            return path;
-        }
-
         [DllImport(NativePlugin.Name, EntryPoint = "RustAV_PlayerCreateTexture")]
         private static extern int GetPlayer(string uri, IntPtr texturePointer);
 
@@ -169,7 +90,7 @@ namespace UnityAV
         private static extern int GetPlayerEx(
             string uri,
             IntPtr texturePointer,
-            ref RustAVPlayerOpenOptions options);
+            ref MediaNativeInteropCommon.RustAVPlayerOpenOptions options);
 
         [DllImport(NativePlugin.Name, EntryPoint = "RustAV_PlayerRelease")]
         private static extern int ReleasePlayer(int id);
@@ -198,7 +119,7 @@ namespace UnityAV
         [DllImport(NativePlugin.Name, EntryPoint = "RustAV_PlayerGetHealthSnapshotV2")]
         private static extern int GetPlayerHealthSnapshotV2(
             int id,
-            ref RustAVPlayerHealthSnapshotV2 snapshot);
+            ref MediaNativeInteropCommon.RustAVPlayerHealthSnapshotV2 snapshot);
 
         [DllImport(NativePlugin.Name, EntryPoint = "RustAV_GetBackendRuntimeDiagnostic")]
         private static extern int GetBackendRuntimeDiagnostic(
@@ -220,7 +141,12 @@ namespace UnityAV
                     "underlying valid native player.");
             }
 
-            Play(_id);
+            var result = Play(_id);
+
+            if (result < 0)
+            {
+                throw new Exception($"Failed to play with error {result}");
+            }
             _playRequested = true;
         }
 
@@ -325,95 +251,103 @@ namespace UnityAV
                 return false;
             }
 
-            try
+            MediaNativeInteropCommon.RuntimeHealthView runtimeHealth;
+            if (!MediaNativeInteropCommon.TryReadRuntimeHealth(
+                GetPlayerHealthSnapshotV2,
+                _id,
+                out runtimeHealth))
             {
-                var snapshot = new RustAVPlayerHealthSnapshotV2
-                {
-                    StructSize = (uint)Marshal.SizeOf(typeof(RustAVPlayerHealthSnapshotV2)),
-                    StructVersion = RustAVPlayerHealthSnapshotV2Version,
-                };
-                var result = GetPlayerHealthSnapshotV2(_id, ref snapshot);
-                if (result < 0)
-                {
-                    return false;
-                }
+                return false;
+            }
 
-                health = new PlayerRuntimeHealth
-                {
-                    SourceConnectionState = NormalizeSourceConnectionState(snapshot.SourceConnectionState),
-                    IsConnected = snapshot.IsConnected != 0,
-                    IsPlaying = snapshot.IsPlaying != 0,
-                    IsRealtime = snapshot.IsRealtime != 0,
-                    SourcePacketCount = snapshot.SourcePacketCount,
-                    SourceTimeoutCount = snapshot.SourceTimeoutCount,
-                    SourceReconnectCount = snapshot.SourceReconnectCount,
-                    SourceLastActivityAgeSec = snapshot.SourceLastActivityAgeSec,
-                    CurrentTimeSec = snapshot.CurrentTimeSec,
-                };
-                return true;
-            }
-            catch (EntryPointNotFoundException)
+            health = new PlayerRuntimeHealth
             {
-                return false;
-            }
-            catch (DllNotFoundException)
-            {
-                return false;
-            }
+                SourceConnectionState = runtimeHealth.SourceConnectionState,
+                IsConnected = runtimeHealth.IsConnected,
+                IsPlaying = runtimeHealth.IsPlaying,
+                IsRealtime = runtimeHealth.IsRealtime,
+                SourcePacketCount = runtimeHealth.SourcePacketCount,
+                SourceTimeoutCount = runtimeHealth.SourceTimeoutCount,
+                SourceReconnectCount = runtimeHealth.SourceReconnectCount,
+                SourceLastActivityAgeSec = runtimeHealth.SourceLastActivityAgeSec,
+                CurrentTimeSec = runtimeHealth.CurrentTimeSec,
+            };
+            return true;
         }
 
-        private void Start()
+        private IEnumerator Start()
         {
             NativeInitializer.Initialize(this);
 
-            var uri = ResolveUri(Uri);
+            MediaSourceResolver.PreparedMediaSource preparedSource = null;
+            Exception resolveError = null;
+            yield return MediaSourceResolver.PreparePlayableSource(
+                Uri,
+                value => preparedSource = value,
+                error => resolveError = error);
 
-            _targetTexture = new Texture2D(Width, Height, TextureFormat.ARGB32, false)
+            if (resolveError != null)
             {
-                filterMode = FilterMode.Bilinear,
-                name = Uri
-            };
+                throw resolveError;
+            }
 
-            var openOptions = new RustAVPlayerOpenOptions
-            {
-                StructSize = (uint)Marshal.SizeOf(typeof(RustAVPlayerOpenOptions)),
-                StructVersion = RustAVPlayerOpenOptionsVersion,
-                BackendKind = (int)PreferredBackend,
-                StrictBackend = StrictBackend ? 1 : 0,
-            };
+            InitializeNativePlayer(preparedSource);
+        }
 
+        private void InitializeNativePlayer(MediaSourceResolver.PreparedMediaSource preparedSource)
+        {
+            var uri = preparedSource.PlaybackUri;
             try
             {
-                _id = GetPlayerEx(uri, _targetTexture.GetNativeTexturePtr(), ref openOptions);
-            }
-            catch (EntryPointNotFoundException)
-            {
-                _id = GetPlayer(uri, _targetTexture.GetNativeTexturePtr());
-            }
+                _targetTexture = new Texture2D(Width, Height, TextureFormat.ARGB32, false)
+                {
+                    filterMode = FilterMode.Bilinear,
+                    name = Uri
+                };
 
-            if (ValidatePlayerId(_id))
-            {
-                _actualBackendKind = ReadActualBackendKind();
-                if (TargetMaterial != null)
+                var openOptions = MediaNativeInteropCommon.CreateOpenOptions(
+                    PreferredBackend,
+                    StrictBackend);
+
+                try
                 {
-                    TargetMaterial.mainTexture = _targetTexture;
+                    _id = GetPlayerEx(uri, _targetTexture.GetNativeTexturePtr(), ref openOptions);
                 }
-                SetLoop(_id, Loop);
-            }
-            else
-            {
-                var diagnostic = ReadBackendRuntimeDiagnostic(uri);
-                if (string.IsNullOrEmpty(diagnostic))
+                catch (EntryPointNotFoundException)
                 {
-                    throw new Exception($"Failed to create player with error: {_id}");
+                    _id = GetPlayer(uri, _targetTexture.GetNativeTexturePtr());
                 }
 
-                throw new Exception($"Failed to create player with error: {_id}; {diagnostic}");
-            }
+                if (ValidatePlayerId(_id))
+                {
+                    _actualBackendKind = ReadActualBackendKind();
+                    if (TargetMaterial != null)
+                    {
+                        TargetMaterial.mainTexture = _targetTexture;
+                    }
+                    SetLoop(_id, Loop);
+                }
+                else
+                {
+                    var diagnostic = ReadBackendRuntimeDiagnostic(uri);
+                    if (string.IsNullOrEmpty(diagnostic))
+                    {
+                        throw new Exception($"Failed to create player with error: {_id}");
+                    }
 
-            if (AutoPlay)
+                    throw new Exception($"Failed to create player with error: {_id}; {diagnostic}");
+                }
+
+                if (AutoPlay)
+                {
+                    Play();
+                }
+            }
+            catch
             {
-                Play();
+                ReleaseNativePlayerSilently();
+                ReleaseManagedResources();
+                throw;
             }
         }
 
@@ -474,6 +408,27 @@ namespace UnityAV
             }
         }
 
+        private void ReleaseNativePlayerSilently()
+        {
+            if (!ValidatePlayerId(_id))
+            {
+                return;
+            }
+
+            try
+            {
+                ReleasePlayer(_id);
+            }
+            catch
+            {
+            }
+
+            _id = InvalidPlayerId;
+            _playRequested = false;
+            _resumeAfterPause = false;
+            _actualBackendKind = MediaBackendKind.Auto;
+        }
+
         private void ReleaseManagedResources()
         {
             if (TargetMaterial != null && ReferenceEquals(TargetMaterial.mainTexture, _targetTexture))
@@ -497,73 +452,23 @@ namespace UnityAV
 
             try
             {
-                var backendKind = GetPlayerBackendKind(_id);
-                switch (backendKind)
-                {
-                    case 1:
-                        return MediaBackendKind.Ffmpeg;
-                    case 2:
-                        return MediaBackendKind.Gstreamer;
-                    default:
-                        return MediaBackendKind.Auto;
-                }
+                return MediaNativeInteropCommon.NormalizeBackendKind(
+                    GetPlayerBackendKind(_id),
+                    PreferredBackend);
             }
             catch (EntryPointNotFoundException)
             {
-                return MediaBackendKind.Auto;
+                return PreferredBackend;
             }
         }
 
         private string ReadBackendRuntimeDiagnostic(string uri)
         {
-            if (string.IsNullOrEmpty(uri))
-            {
-                return string.Empty;
-            }
-
-            try
-            {
-                var buffer = new StringBuilder(BackendDiagnosticBufferLength);
-                var result = GetBackendRuntimeDiagnostic(
-                    (int)PreferredBackend,
-                    uri,
-                    false,
-                    buffer,
-                    buffer.Capacity);
-                if (result >= 0 && buffer.Length > 0)
-                {
-                    return buffer.ToString();
-                }
-            }
-            catch (EntryPointNotFoundException)
-            {
-                return string.Empty;
-            }
-            catch (DllNotFoundException)
-            {
-                return string.Empty;
-            }
-
-            return string.Empty;
-        }
-
-        private static MediaSourceConnectionState NormalizeSourceConnectionState(int value)
-        {
-            switch (value)
-            {
-                case 0:
-                    return MediaSourceConnectionState.Disconnected;
-                case 1:
-                    return MediaSourceConnectionState.Connecting;
-                case 2:
-                    return MediaSourceConnectionState.Connected;
-                case 3:
-                    return MediaSourceConnectionState.Reconnecting;
-                case 4:
-                    return MediaSourceConnectionState.Checking;
-                default:
-                    return MediaSourceConnectionState.Unknown;
-            }
+            return MediaNativeInteropCommon.ReadBackendRuntimeDiagnostic(
+                GetBackendRuntimeDiagnostic,
+                PreferredBackend,
+                uri,
+                false);
         }
     }
 }

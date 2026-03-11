@@ -17,12 +17,14 @@ namespace UnityAV
         public float ValidationSeconds = 6f;
         public float StartupTimeoutSeconds = 10f;
         public float LogIntervalSeconds = 1f;
+        public float RealtimeReferenceLagToleranceSeconds = 0.10f;
         public string UriArgumentName = "-uri=";
         public string BackendArgumentName = "-backend=";
         public string ValidationSecondsArgumentName = "-validationSeconds=";
         public string StartupTimeoutSecondsArgumentName = "-startupTimeoutSeconds=";
         public string WindowWidthArgumentName = "-windowWidth=";
         public string WindowHeightArgumentName = "-windowHeight=";
+        public string PublisherStartUnixMsArgumentName = "-publisherStartUnixMs=";
         public bool ForceWindowedMode = true;
         public Transform VideoSurface;
         public Camera ValidationCamera;
@@ -40,6 +42,8 @@ namespace UnityAV
         private string _validationWindowStartReason = string.Empty;
         private double _validationWindowInitialPlaybackTime = -1.0;
         private double _maxObservedPlaybackTime = -1.0;
+        private long _publisherStartUnixMs = -1;
+        private bool _hasPublisherStartUnixMs;
         private bool _observedTextureDuringWindow;
         private bool _observedAudioDuringWindow;
         private bool _observedStartedDuringWindow;
@@ -80,6 +84,10 @@ namespace UnityAV
             StartupTimeoutSeconds = TryReadFloatArgument(
                 StartupTimeoutSecondsArgumentName,
                 StartupTimeoutSeconds);
+            _publisherStartUnixMs = TryReadLongArgument(
+                PublisherStartUnixMsArgumentName,
+                -1L,
+                out _hasPublisherStartUnixMs);
 
             _requestedWindowWidth = TryReadIntArgument(WindowWidthArgumentName, Player.Width, out _hasExplicitWindowWidth);
             _requestedWindowHeight = TryReadIntArgument(WindowHeightArgumentName, Player.Height, out _hasExplicitWindowHeight);
@@ -141,12 +149,14 @@ namespace UnityAV
                 if (!_validationWindowStarted)
                 {
                     var startupElapsed = now - startTime;
-                    if (snapshot.Started)
+                    var outputsReady = snapshot.HasTexture
+                        && (!Player.EnableAudio || snapshot.AudioPlaying);
+                    if (outputsReady)
                     {
                         StartValidationWindow(
                             now,
                             startupElapsed,
-                            "playback-start",
+                            "av-output-start",
                             snapshot.PlaybackTime);
                     }
                     else if (startupElapsed >= StartupTimeoutSeconds)
@@ -206,6 +216,31 @@ namespace UnityAV
                 Screen.fullScreen,
                 Screen.fullScreenMode,
                 Player.ActualBackendKind));
+            if (snapshot.HasAvSyncSample)
+            {
+                Debug.Log(string.Format(
+                    "[CodexValidation] av_sync delta_ms={0:F1} audio_presented_sec={1:F3} playback_sec={2:F3} audio_pipeline_delay_ms={3:F1}",
+                    snapshot.AvSyncDeltaMilliseconds,
+                    snapshot.AudioPresentedTimeSec,
+                    snapshot.PlaybackTime,
+                    snapshot.AudioPipelineDelaySec * 1000.0));
+            }
+            if (snapshot.HasRealtimeLatencySample)
+            {
+                Debug.Log(string.Format(
+                    "[CodexValidation] realtime_latency latency_ms={0:F1} publisher_elapsed_sec={1:F3} reference_sec={2:F3}",
+                    snapshot.RealtimeLatencyMilliseconds,
+                    snapshot.PublisherElapsedTimeSec,
+                    snapshot.RealtimeReferenceTimeSec));
+            }
+            if (snapshot.HasRealtimeProbeSample)
+            {
+                Debug.Log(string.Format(
+                    "[CodexValidation] realtime_probe unix_ms={0} reference_sec={1:F3}",
+                    snapshot.RealtimeProbeUnixMs,
+                    snapshot.RealtimeReferenceTimeSec));
+            }
+
             return snapshot;
         }
 
@@ -219,8 +254,64 @@ namespace UnityAV
             var audioPlaying = audioSource != null && audioSource.isPlaying;
             var textureWidth = hasTexture ? Player.TargetMaterial.mainTexture.width : 0;
             var textureHeight = hasTexture ? Player.TargetMaterial.mainTexture.height : 0;
+            double audioPresentedTimeSec;
+            double audioPipelineDelaySec;
+            var hasAudioPresentation = Player.TryGetEstimatedAudioPresentation(
+                out audioPresentedTimeSec,
+                out audioPipelineDelaySec);
+
             MediaPlayerPull.PlayerRuntimeHealth health;
             var hasHealth = Player.TryGetRuntimeHealth(out health);
+            double presentedVideoTimeSec;
+            var hasPresentedVideoTime = Player.TryGetPresentedVideoTimeSec(out presentedVideoTimeSec);
+            var referencePlaybackTime = hasPresentedVideoTime
+                ? presentedVideoTimeSec
+                : playbackTime;
+            if (hasHealth)
+            {
+                if (referencePlaybackTime < 0.0)
+                {
+                    referencePlaybackTime = health.CurrentTimeSec;
+                }
+                else if (health.IsRealtime
+                    && health.CurrentTimeSec > referencePlaybackTime + RealtimeReferenceLagToleranceSeconds)
+                {
+                    referencePlaybackTime = health.CurrentTimeSec;
+                }
+            }
+
+            var hasAvSyncSample = hasAudioPresentation && referencePlaybackTime >= 0.0;
+            var avSyncDeltaMilliseconds = hasAvSyncSample
+                ? (audioPresentedTimeSec - referencePlaybackTime) * 1000.0
+                : 0.0;
+            var hasRealtimeLatencySample = false;
+            var realtimeLatencyMilliseconds = 0.0;
+            var publisherElapsedTimeSec = 0.0;
+            var hasRealtimeProbeSample = false;
+            long realtimeProbeUnixMs = 0;
+            if (hasHealth
+                && health.IsRealtime
+                && referencePlaybackTime >= 0.0)
+            {
+                realtimeProbeUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                hasRealtimeProbeSample = true;
+            }
+            if (_hasPublisherStartUnixMs
+                && hasHealth
+                && health.IsRealtime
+                && referencePlaybackTime >= 0.0)
+            {
+                var nowUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (nowUnixMs >= _publisherStartUnixMs)
+                {
+                    publisherElapsedTimeSec =
+                        (nowUnixMs - _publisherStartUnixMs) / 1000.0;
+                    realtimeLatencyMilliseconds =
+                        (publisherElapsedTimeSec - referencePlaybackTime) * 1000.0;
+                    hasRealtimeLatencySample = true;
+                }
+            }
+
             return new ValidationSnapshot
             {
                 PlaybackTime = playbackTime,
@@ -233,6 +324,16 @@ namespace UnityAV
                 SourcePackets = hasHealth ? health.SourcePacketCount.ToString() : "-1",
                 SourceTimeouts = hasHealth ? health.SourceTimeoutCount.ToString() : "-1",
                 SourceReconnects = hasHealth ? health.SourceReconnectCount.ToString() : "-1",
+                HasAvSyncSample = hasAvSyncSample,
+                AudioPresentedTimeSec = audioPresentedTimeSec,
+                AudioPipelineDelaySec = audioPipelineDelaySec,
+                AvSyncDeltaMilliseconds = avSyncDeltaMilliseconds,
+                HasRealtimeLatencySample = hasRealtimeLatencySample,
+                RealtimeLatencyMilliseconds = realtimeLatencyMilliseconds,
+                PublisherElapsedTimeSec = publisherElapsedTimeSec,
+                RealtimeReferenceTimeSec = referencePlaybackTime,
+                HasRealtimeProbeSample = hasRealtimeProbeSample,
+                RealtimeProbeUnixMs = realtimeProbeUnixMs,
             };
         }
 
@@ -489,6 +590,19 @@ namespace UnityAV
             return parsed;
         }
 
+        private static long TryReadLongArgument(string prefix, long fallback, out bool hasExplicitValue)
+        {
+            var value = TryReadStringArgument(prefix);
+            hasExplicitValue = !string.IsNullOrEmpty(value);
+            long parsed;
+            if (string.IsNullOrEmpty(value) || !long.TryParse(value, out parsed))
+            {
+                return fallback;
+            }
+
+            return parsed;
+        }
+
         private static bool TryParseBackend(string rawValue, out MediaBackendKind backend)
         {
             backend = MediaBackendKind.Auto;
@@ -537,6 +651,16 @@ namespace UnityAV
             public string SourcePackets;
             public string SourceTimeouts;
             public string SourceReconnects;
+            public bool HasAvSyncSample;
+            public double AudioPresentedTimeSec;
+            public double AudioPipelineDelaySec;
+            public double AvSyncDeltaMilliseconds;
+            public bool HasRealtimeLatencySample;
+            public double RealtimeLatencyMilliseconds;
+            public double PublisherElapsedTimeSec;
+            public double RealtimeReferenceTimeSec;
+            public bool HasRealtimeProbeSample;
+            public long RealtimeProbeUnixMs;
         }
     }
 }
