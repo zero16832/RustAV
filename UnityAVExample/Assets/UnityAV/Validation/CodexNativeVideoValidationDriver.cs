@@ -53,6 +53,20 @@ namespace UnityAV
         private bool _observedDirectShaderPathDuringWindow;
         private bool _observedComputePathDuringWindow;
 
+        private string BackendSummary
+        {
+            get
+            {
+                if (Player == null)
+                {
+                    return " requested_backend=Unknown actual_backend=Unknown";
+                }
+
+                return " requested_backend=" + Player.PreferredBackend
+                    + " actual_backend=" + Player.ActualBackendKind;
+            }
+        }
+
         private void Awake()
         {
             if (Player == null)
@@ -230,7 +244,8 @@ namespace UnityAV
                     + " require_unity_direct_shader=" + RequireUnityDirectShader
                     + " prefer_unity_compute=" + PreferUnityNv12Compute
                     + " require_unity_compute=" + RequireUnityCompute
-                    + " require_strict_zero_copy=" + RequireStrictZeroCopy);
+                    + " require_strict_zero_copy=" + RequireStrictZeroCopy
+                    + BackendSummary);
                 StartCoroutine(QuitAfterDelay(1f, 2));
                 return;
             }
@@ -300,7 +315,8 @@ namespace UnityAV
                             + " strict_zero_copy_active=" + snapshot.StrictZeroCopyActive
                             + " native_texture_bound=" + FormatBindingState(snapshot)
                             + " binding_state_source="
-                            + snapshot.NativeTextureBindingStateSource);
+                            + snapshot.NativeTextureBindingStateSource
+                            + BackendSummary);
                         Debug.LogError(
                             "[CodexNativeValidation] startup_timeout native_video_active="
                             + Player.IsNativeVideoPathActive
@@ -503,7 +519,8 @@ namespace UnityAV
                     + " direct_shader_path_active=" + snapshot.DirectShaderPathActive
                     + " compute_path_active=" + snapshot.ComputePathActive
                     + " source_plane_texture_flags=0x"
-                    + snapshot.SourcePlaneTextureFlags.ToString("X"));
+                    + snapshot.SourcePlaneTextureFlags.ToString("X")
+                    + BackendSummary);
                 return false;
             }
 
@@ -527,7 +544,8 @@ namespace UnityAV
                     + " direct_shader_path_active=" + snapshot.DirectShaderPathActive
                     + " compute_path_active=" + snapshot.ComputePathActive
                     + " source_plane_texture_flags=0x"
-                    + snapshot.SourcePlaneTextureFlags.ToString("X"));
+                    + snapshot.SourcePlaneTextureFlags.ToString("X")
+                    + BackendSummary);
                 return false;
             }
 
@@ -552,7 +570,8 @@ namespace UnityAV
                     + " direct_shader_path_active=" + snapshot.DirectShaderPathActive
                     + " compute_path_active=" + snapshot.ComputePathActive
                     + " source_plane_texture_flags=0x"
-                    + snapshot.SourcePlaneTextureFlags.ToString("X"));
+                    + snapshot.SourcePlaneTextureFlags.ToString("X")
+                    + BackendSummary);
                 return false;
             }
 
@@ -582,7 +601,8 @@ namespace UnityAV
                         + " source_plane_texture_flags=0x"
                         + snapshot.SourcePlaneTextureFlags.ToString("X")
                         + " pixel_format=" + snapshot.PixelFormat
-                        + " source_pixel_format=" + snapshot.SourcePixelFormat);
+                        + " source_pixel_format=" + snapshot.SourcePixelFormat
+                        + BackendSummary);
                     return false;
                 }
 
@@ -613,7 +633,8 @@ namespace UnityAV
                         + " source_pixel_format=" + snapshot.SourcePixelFormat
                         + " final_native_texture_bound=" + FormatBindingState(snapshot)
                         + " binding_state_source="
-                        + snapshot.NativeTextureBindingStateSource);
+                        + snapshot.NativeTextureBindingStateSource
+                        + BackendSummary);
                     return false;
                 }
             }
@@ -642,7 +663,8 @@ namespace UnityAV
                         + " source_plane_texture_flags=0x"
                         + snapshot.SourcePlaneTextureFlags.ToString("X")
                         + " pixel_format=" + snapshot.PixelFormat
-                        + " source_pixel_format=" + snapshot.SourcePixelFormat);
+                        + " source_pixel_format=" + snapshot.SourcePixelFormat
+                        + BackendSummary);
                     return false;
                 }
 
@@ -668,7 +690,8 @@ namespace UnityAV
                         + " source_plane_texture_flags=0x"
                         + snapshot.SourcePlaneTextureFlags.ToString("X")
                         + " pixel_format=" + snapshot.PixelFormat
-                        + " source_pixel_format=" + snapshot.SourcePixelFormat);
+                        + " source_pixel_format=" + snapshot.SourcePixelFormat
+                        + BackendSummary);
                     return false;
                 }
             }
@@ -697,7 +720,8 @@ namespace UnityAV
                         + " source_plane_texture_flags=0x"
                         + snapshot.SourcePlaneTextureFlags.ToString("X")
                         + " pixel_format=" + snapshot.PixelFormat
-                        + " source_pixel_format=" + snapshot.SourcePixelFormat);
+                        + " source_pixel_format=" + snapshot.SourcePixelFormat
+                        + BackendSummary);
                     return false;
                 }
 
@@ -723,7 +747,8 @@ namespace UnityAV
                         + " source_plane_texture_flags=0x"
                         + snapshot.SourcePlaneTextureFlags.ToString("X")
                         + " pixel_format=" + snapshot.PixelFormat
-                        + " source_pixel_format=" + snapshot.SourcePixelFormat);
+                        + " source_pixel_format=" + snapshot.SourcePixelFormat
+                        + BackendSummary);
                     return false;
                 }
             }
@@ -751,7 +776,8 @@ namespace UnityAV
                     + HasNativeVideoFrameFlag(
                         snapshot.SourceFlags,
                         MediaNativeInteropCommon.NativeVideoFrameFlagZeroCopy)
-                    + " strict_zero_copy_active=" + snapshot.StrictZeroCopyActive);
+                    + " strict_zero_copy_active=" + snapshot.StrictZeroCopyActive
+                    + BackendSummary);
                 return false;
             }
 
@@ -824,7 +850,8 @@ namespace UnityAV
                 + " source_equals_presented_handle="
                 + (snapshot.HasNativeSourceFrame
                     && snapshot.HasNativeFrame
-                    && snapshot.SourceNativeHandle == snapshot.NativeHandle));
+                    && snapshot.SourceNativeHandle == snapshot.NativeHandle)
+                + BackendSummary);
             return true;
         }
 
