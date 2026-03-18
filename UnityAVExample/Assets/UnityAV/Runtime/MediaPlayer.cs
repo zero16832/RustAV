@@ -1657,10 +1657,6 @@ namespace UnityAV
                 {
                     _nativeVideoFrameDuplicateAcquireCount += 1;
                     _nativeVideoFrameConsecutiveDuplicateCount += 1;
-                    if (ShouldWarmupFileNativeVideoStartupPresentation())
-                    {
-                        _nativeVideoStartupWarmupStableFrameCount = 0;
-                    }
                     _nativeVideoFrameMaxConsecutiveDuplicateCount = Math.Max(
                         _nativeVideoFrameMaxConsecutiveDuplicateCount,
                         _nativeVideoFrameConsecutiveDuplicateCount);
@@ -1843,6 +1839,19 @@ namespace UnityAV
                     _nativeVideoFramePresentedCount += 1;
                     _nativeVideoFramePresentedLifetimeCount += 1;
                     _nativeVideoStartupWarmupCompleted = true;
+                    if (TraceNativeVideoCadence
+                        && _nativeVideoFramePresentedLifetimeCount == 1)
+                    {
+                        Debug.Log(
+                            "[MediaPlayer] native_video_startup_first_present"
+                            + " startup_seconds=" + StartupElapsedSeconds.ToString("F3")
+                            + " frame_index=" + frameInfo.FrameIndex
+                            + " frame_time=" + frameInfo.TimeSec.ToString("F3")
+                            + " suppressed_total=" + _nativeVideoStartupWarmupSuppressedFrameCount
+                            + " acquire_misses=" + _nativeVideoFrameAcquireMissCount
+                            + " duplicates=" + _nativeVideoFrameDuplicateAcquireCount
+                            + " presentation_path=" + presentationPath);
+                    }
                     switch (presentationPath)
                     {
                         case NativeVideoPresentationPathKind.RenderEventPass:
@@ -2582,27 +2591,16 @@ namespace UnityAV
         private static NativeVideoColorInfo CreateDefaultNativeVideoPlaneColorInfo(
             NativeVideoPlaneTexturesInfo texturesInfo)
         {
-            if (texturesInfo.SourcePixelFormat == NativeVideoPixelFormatKind.P010)
-            {
-                return new NativeVideoColorInfo
-                {
-                    Range = NativeVideoColorRangeKind.Limited,
-                    Matrix = NativeVideoColorMatrixKind.Bt2020Ncl,
-                    Primaries = NativeVideoColorPrimariesKind.Bt2020,
-                    Transfer = NativeVideoTransferCharacteristicKind.Pq,
-                    BitDepth = 10,
-                    DynamicRange = NativeVideoDynamicRangeKind.Hdr10,
-                };
-            }
-
             return new NativeVideoColorInfo
             {
                 Range = NativeVideoColorRangeKind.Limited,
-                Matrix = NativeVideoColorMatrixKind.Bt709,
-                Primaries = NativeVideoColorPrimariesKind.Bt709,
-                Transfer = NativeVideoTransferCharacteristicKind.Bt1886,
-                BitDepth = 8,
-                DynamicRange = NativeVideoDynamicRangeKind.Sdr,
+                Matrix = NativeVideoColorMatrixKind.Unknown,
+                Primaries = NativeVideoColorPrimariesKind.Unknown,
+                Transfer = NativeVideoTransferCharacteristicKind.Unknown,
+                BitDepth = texturesInfo.SourcePixelFormat == NativeVideoPixelFormatKind.P010
+                    ? 10
+                    : 8,
+                DynamicRange = NativeVideoDynamicRangeKind.Unknown,
             };
         }
 
@@ -2644,6 +2642,12 @@ namespace UnityAV
                 }
             }
 
+            var hasHdrSignal = colorInfo.DynamicRange == NativeVideoDynamicRangeKind.Hdr10
+                || colorInfo.DynamicRange == NativeVideoDynamicRangeKind.DolbyVision
+                || colorInfo.DynamicRange == NativeVideoDynamicRangeKind.Hlg
+                || colorInfo.Transfer == NativeVideoTransferCharacteristicKind.Pq
+                || colorInfo.Transfer == NativeVideoTransferCharacteristicKind.Hlg;
+
             if (colorInfo.Range == NativeVideoColorRangeKind.Unknown)
             {
                 colorInfo.Range = NativeVideoColorRangeKind.Limited;
@@ -2651,7 +2655,7 @@ namespace UnityAV
 
             if (colorInfo.Matrix == NativeVideoColorMatrixKind.Unknown)
             {
-                colorInfo.Matrix = texturesInfo.SourcePixelFormat == NativeVideoPixelFormatKind.P010
+                colorInfo.Matrix = hasHdrSignal
                     ? NativeVideoColorMatrixKind.Bt2020Ncl
                     : NativeVideoColorMatrixKind.Bt709;
             }
@@ -2672,16 +2676,34 @@ namespace UnityAV
 
             if (colorInfo.DynamicRange == NativeVideoDynamicRangeKind.Unknown)
             {
-                colorInfo.DynamicRange = colorInfo.Transfer == NativeVideoTransferCharacteristicKind.Pq
-                    ? NativeVideoDynamicRangeKind.Hdr10
-                    : NativeVideoDynamicRangeKind.Sdr;
+                if (colorInfo.Transfer == NativeVideoTransferCharacteristicKind.Pq)
+                {
+                    colorInfo.DynamicRange = NativeVideoDynamicRangeKind.Hdr10;
+                }
+                else if (colorInfo.Transfer == NativeVideoTransferCharacteristicKind.Hlg)
+                {
+                    colorInfo.DynamicRange = NativeVideoDynamicRangeKind.Hlg;
+                }
+                else if (colorInfo.BitDepth >= 10
+                    && IsBt2020ColorMatrix(colorInfo.Matrix)
+                    && colorInfo.Primaries == NativeVideoColorPrimariesKind.Bt2020)
+                {
+                    colorInfo.DynamicRange = NativeVideoDynamicRangeKind.Hdr10;
+                }
+                else
+                {
+                    colorInfo.DynamicRange = NativeVideoDynamicRangeKind.Sdr;
+                }
             }
 
             if (colorInfo.Transfer == NativeVideoTransferCharacteristicKind.Unknown)
             {
                 colorInfo.Transfer = colorInfo.DynamicRange == NativeVideoDynamicRangeKind.Hdr10
+                    || colorInfo.DynamicRange == NativeVideoDynamicRangeKind.DolbyVision
                     ? NativeVideoTransferCharacteristicKind.Pq
-                    : NativeVideoTransferCharacteristicKind.Bt1886;
+                    : colorInfo.DynamicRange == NativeVideoDynamicRangeKind.Hlg
+                        ? NativeVideoTransferCharacteristicKind.Hlg
+                        : NativeVideoTransferCharacteristicKind.Bt1886;
             }
 
             return colorInfo;
@@ -2751,6 +2773,7 @@ namespace UnityAV
                         "Unsupported native video plane texture format: " + textureFormat);
             }
         }
+
         private void ApplyPresentedTexture(Texture texture)
         {
             DisableNativeVideoPlaneTextureMode();
@@ -3441,10 +3464,16 @@ namespace UnityAV
                 return true;
             }
 
+            if (frameIndexDelta == 0 && frameTimeDeltaSec <= 0.0)
+            {
+                return true;
+            }
+
             var stableCadence = frameIndexDelta == 1
                 && frameTimeDeltaSec > 0.0
                 && realtimeDeltaSec > 0.0f
-                && realtimeDeltaSec <= 0.025f;
+                && frameTimeDeltaSec <= 0.050
+                && realtimeDeltaSec <= Math.Max(0.050f, (float)frameTimeDeltaSec * 2.5f);
             if (stableCadence)
             {
                 _nativeVideoStartupWarmupStableFrameCount += 1;

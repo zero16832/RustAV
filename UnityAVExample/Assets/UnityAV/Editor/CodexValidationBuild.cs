@@ -19,10 +19,12 @@ namespace UnityAV.Editor
         private const string PullScenePath = "Assets/UnityAV/Validation/CodexPullValidation.generated.unity";
         private const string NativeScenePath = "Assets/UnityAV/Validation/CodexNativeVideoValidation.generated.unity";
         private const string MediaPlayerAuditScenePath = "Assets/UnityAV/Validation/CodexMediaPlayerAudioAudit.generated.unity";
+        private const string NativePreviewScenePath = "Assets/UnityAV/Validation/CodexNativeVideoPreview.generated.unity";
         private const string MaterialPath = "Assets/UnityAV/Materials/VideoMaterial.mat";
         private const string PullBuildPath = "Build/CodexPullValidation/CodexPullValidation.exe";
         private const string NativeBuildPath = "Build/CodexNativeVideoValidation/CodexNativeVideoValidation.exe";
         private const string MediaPlayerAuditBuildPath = "Build/CodexMediaPlayerAudioAudit/CodexMediaPlayerAudioAudit.exe";
+        private const string NativePreviewBuildPath = "Build/CodexNativeVideoPreview/CodexNativeVideoPreview.exe";
         private const string SampleUri = "SampleVideo_1280x720_10mb.mp4";
         private const int DefaultVideoWidth = 1280;
         private const int DefaultVideoHeight = 720;
@@ -85,6 +87,25 @@ namespace UnityAV.Editor
             AssetDatabase.Refresh();
 
             Debug.Log("[CodexValidationBuild] media_player_audit_scene_created=" + MediaPlayerAuditScenePath);
+        }
+
+        public static void CreateNativeVideoPreviewScene()
+        {
+            DeleteGeneratedValidationScene(NativePreviewScenePath);
+
+            var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+
+            var camera = CreateCamera();
+            var surface = CreateVideoSurface();
+            var player = CreateNativeVideoPreviewPlayer();
+            CreateNativeVideoPreviewDriver(player, surface.transform, camera);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(NativePreviewScenePath) ?? "Assets/UnityAV/Validation");
+            EditorSceneManager.SaveScene(scene, NativePreviewScenePath);
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+
+            Debug.Log("[CodexValidationBuild] native_preview_scene_created=" + NativePreviewScenePath);
         }
 
         public static void BuildWindowsValidationPlayer()
@@ -240,6 +261,57 @@ namespace UnityAV.Editor
             Debug.Log("[CodexValidationBuild] media_player_audit_build_succeeded=" + MediaPlayerAuditBuildPath);
         }
 
+        public static void BuildWindowsNativeVideoPreviewPlayer()
+        {
+            WindowsNativeRuntimePackager.ConfigureProjectRuntimeImportSettings();
+            WindowsNativeRuntimePackager.EnsureProjectRuntimeAvailable();
+            CreateNativeVideoPreviewScene();
+
+            PrepareBuildOutput(NativePreviewBuildPath);
+            var previousFullScreenMode = PlayerSettings.fullScreenMode;
+            var previousDefaultScreenWidth = PlayerSettings.defaultScreenWidth;
+            var previousDefaultScreenHeight = PlayerSettings.defaultScreenHeight;
+            var previousResizableWindow = PlayerSettings.resizableWindow;
+            var previousDefaultIsNativeResolution = PlayerSettings.defaultIsNativeResolution;
+
+            PlayerSettings.fullScreenMode = FullScreenMode.Windowed;
+            PlayerSettings.defaultScreenWidth = DefaultVideoWidth;
+            PlayerSettings.defaultScreenHeight = DefaultVideoHeight;
+            PlayerSettings.resizableWindow = true;
+            PlayerSettings.defaultIsNativeResolution = false;
+
+            BuildReport report;
+            try
+            {
+                report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
+                {
+                    scenes = new[] { NativePreviewScenePath },
+                    locationPathName = NativePreviewBuildPath,
+                    target = BuildTarget.StandaloneWindows64,
+                    options = BuildOptions.None,
+                });
+            }
+            finally
+            {
+                PlayerSettings.fullScreenMode = previousFullScreenMode;
+                PlayerSettings.defaultScreenWidth = previousDefaultScreenWidth;
+                PlayerSettings.defaultScreenHeight = previousDefaultScreenHeight;
+                PlayerSettings.resizableWindow = previousResizableWindow;
+                PlayerSettings.defaultIsNativeResolution = previousDefaultIsNativeResolution;
+                DeleteGeneratedValidationScene(NativePreviewScenePath);
+            }
+
+            if (report.summary.result != BuildResult.Succeeded)
+            {
+                throw new System.Exception(
+                    "Windows NativeVideo 预览包构建失败: " + report.summary.result);
+            }
+
+            WindowsNativeRuntimePackager.PackageGstreamerRuntimeOrThrow(NativePreviewBuildPath);
+
+            Debug.Log("[CodexValidationBuild] native_preview_build_succeeded=" + NativePreviewBuildPath);
+        }
+
         private static Camera CreateCamera()
         {
             var cameraObject = new GameObject("Main Camera");
@@ -324,6 +396,25 @@ namespace UnityAV.Editor
             return player;
         }
 
+        private static MediaPlayer CreateNativeVideoPreviewPlayer()
+        {
+            var playerObject = new GameObject("Native Preview Player");
+            var player = playerObject.AddComponent<MediaPlayer>();
+            player.Uri = SampleUri;
+            player.Loop = true;
+            player.AutoPlay = true;
+            player.Width = DefaultVideoWidth;
+            player.Height = DefaultVideoHeight;
+            player.TargetMaterial = AssetDatabase.LoadAssetAtPath<Material>(MaterialPath);
+            player.PreferNativeVideo = true;
+            player.RequireNativeVideoHardwareDecode = true;
+            player.RequireNativeVideoZeroCopy = false;
+            player.PreferNativeVideoRenderEventPass = false;
+            player.PreferNativeVideoUnityDirectShader = true;
+            player.PreferNativeVideoUnityCompute = false;
+            return player;
+        }
+
         private static void CreateDriver(MediaPlayerPull player, Transform surface, Camera camera)
         {
             var driver = player.gameObject.AddComponent<CodexValidationDriver>();
@@ -359,6 +450,18 @@ namespace UnityAV.Editor
             driver.LogIntervalSeconds = 1f;
             driver.VideoSurface = surface;
             driver.ValidationCamera = camera;
+        }
+
+        private static void CreateNativeVideoPreviewDriver(
+            MediaPlayer player,
+            Transform surface,
+            Camera camera)
+        {
+            var driver = player.gameObject.AddComponent<CodexNativeVideoPreviewDriver>();
+            driver.Player = player;
+            driver.VideoSurface = surface;
+            driver.PreviewCamera = camera;
+            driver.DefaultLoop = true;
         }
 
         private static void DeleteGeneratedValidationScene(string scenePath)

@@ -455,6 +455,24 @@ namespace UnityAV
         private ValidationSnapshot EmitStatus()
         {
             var snapshot = CaptureSnapshot();
+            var audioSource = Player != null ? Player.GetComponent<AudioSource>() : null;
+            var audioSourcePresent = audioSource != null;
+            var audioPlaying = audioSourcePresent && audioSource.isPlaying;
+            var audioTimeSamples = audioSourcePresent ? audioSource.timeSamples : -1;
+            var audioClipFrequency = audioSourcePresent && audioSource.clip != null
+                ? audioSource.clip.frequency
+                : 0;
+            var audioClipChannels = audioSourcePresent && audioSource.clip != null
+                ? audioSource.clip.channels
+                : 0;
+            MediaPlayer.NativeVideoPresentationTelemetrySnapshot presentationSnapshot =
+                default(MediaPlayer.NativeVideoPresentationTelemetrySnapshot);
+            var hasPresentationSnapshot = false;
+            if (Player != null)
+            {
+                hasPresentationSnapshot = Player.TryTakeNativeVideoPresentationTelemetrySnapshot(
+                    out presentationSnapshot);
+            }
             var sourceHardwareDecode = HasNativeVideoFrameFlag(
                 snapshot.SourceFlags,
                 MediaNativeInteropCommon.NativeVideoFrameFlagHardwareDecode);
@@ -501,6 +519,42 @@ namespace UnityAV
                 + " presented_cpu_fallback=" + presentedCpuFallback
                 + " strict_zero_copy=" + strictZeroCopyObserved
                 + " texture=" + snapshot.HasTexture
+                + " audio_source_present=" + audioSourcePresent
+                + " audio_playing=" + audioPlaying
+                + " audio_time_samples=" + audioTimeSamples
+                + " audio_clip_hz=" + audioClipFrequency
+                + " audio_clip_channels=" + audioClipChannels
+                + " presentation_snapshot_available=" + hasPresentationSnapshot
+                + " presentation_direct_shader_attempt_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.DirectShaderAttemptCount : 0)
+                + " presentation_direct_shader_success_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.DirectShaderSuccessCount : 0)
+                + " presentation_direct_shader_source_plane_textures_unsupported_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.DirectShaderSourcePlaneTexturesUnsupportedCount : 0)
+                + " presentation_direct_shader_shader_unavailable_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.DirectShaderShaderUnavailableCount : 0)
+                + " presentation_direct_shader_acquire_source_plane_textures_failure_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.DirectShaderAcquireSourcePlaneTexturesFailureCount : 0)
+                + " presentation_direct_shader_plane_textures_usability_failure_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.DirectShaderPlaneTexturesUsabilityFailureCount : 0)
+                + " presentation_direct_shader_material_failure_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.DirectShaderMaterialFailureCount : 0)
+                + " presentation_direct_shader_exception_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.DirectShaderExceptionCount : 0)
+                + " presentation_compute_attempt_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.ComputeAttemptCount : 0)
+                + " presentation_compute_success_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.ComputeSuccessCount : 0)
+                + " presentation_compute_source_plane_textures_unsupported_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.ComputeSourcePlaneTexturesUnsupportedCount : 0)
+                + " presentation_compute_shader_unavailable_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.ComputeShaderUnavailableCount : 0)
+                + " presentation_compute_acquire_source_plane_textures_failure_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.ComputeAcquireSourcePlaneTexturesFailureCount : 0)
+                + " presentation_compute_plane_textures_usability_failure_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.ComputePlaneTexturesUsabilityFailureCount : 0)
+                + " presentation_compute_exception_count="
+                + (hasPresentationSnapshot ? presentationSnapshot.ComputeExceptionCount : 0)
                 + " backend=" + Player.ActualBackendKind);
             return snapshot;
         }

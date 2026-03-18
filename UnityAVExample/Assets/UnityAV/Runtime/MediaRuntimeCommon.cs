@@ -105,6 +105,7 @@ namespace UnityAV
         Sdr = 1,
         Hdr10 = 2,
         Hlg = 3,
+        DolbyVision = 4,
     }
 
     public enum NativeVideoPlaneTextureFormatKind
@@ -209,6 +210,7 @@ namespace UnityAV
             Sdr = 1,
             Hdr10 = 2,
             Hlg = 3,
+            DolbyVision = 4,
         }
 
         internal enum NativeVideoPlaneTextureFormat
@@ -417,15 +419,23 @@ namespace UnityAV
 
         internal struct RuntimeHealthView
         {
+            public int State;
+            public int RuntimeState;
+            public int PlaybackIntent;
+            public int StopReason;
             public MediaSourceConnectionState SourceConnectionState;
             public bool IsConnected;
             public bool IsPlaying;
             public bool IsRealtime;
+            public bool CanSeek;
+            public bool IsLooping;
             public long SourcePacketCount;
             public long SourceTimeoutCount;
             public long SourceReconnectCount;
+            public double DurationSec;
             public double SourceLastActivityAgeSec;
             public double CurrentTimeSec;
+            public double ExternalTimeSec;
             public double AudioTimeSec;
             public double AudioPresentedTimeSec;
             public double AudioSinkDelaySec;
@@ -532,15 +542,23 @@ namespace UnityAV
 
                 health = new RuntimeHealthView
                 {
+                    State = snapshot.State,
+                    RuntimeState = snapshot.RuntimeState,
+                    PlaybackIntent = snapshot.PlaybackIntent,
+                    StopReason = snapshot.StopReason,
                     SourceConnectionState = NormalizeSourceConnectionState(snapshot.SourceConnectionState),
                     IsConnected = snapshot.IsConnected != 0,
                     IsPlaying = snapshot.IsPlaying != 0,
                     IsRealtime = snapshot.IsRealtime != 0,
+                    CanSeek = snapshot.CanSeek != 0,
+                    IsLooping = snapshot.IsLooping != 0,
                     SourcePacketCount = snapshot.SourcePacketCount,
                     SourceTimeoutCount = snapshot.SourceTimeoutCount,
                     SourceReconnectCount = snapshot.SourceReconnectCount,
+                    DurationSec = snapshot.DurationSec,
                     SourceLastActivityAgeSec = snapshot.SourceLastActivityAgeSec,
                     CurrentTimeSec = snapshot.CurrentTimeSec,
+                    ExternalTimeSec = snapshot.ExternalTimeSec,
                     AudioTimeSec = snapshot.AudioTimeSec,
                     AudioPresentedTimeSec = snapshot.AudioPresentedTimeSec,
                     AudioSinkDelaySec = snapshot.AudioSinkDelaySec,
@@ -1308,6 +1326,8 @@ namespace UnityAV
                     return NativeVideoDynamicRange.Hdr10;
                 case 3:
                     return NativeVideoDynamicRange.Hlg;
+                case 4:
+                    return NativeVideoDynamicRange.DolbyVision;
                 default:
                     return NativeVideoDynamicRange.Unknown;
             }
@@ -1463,6 +1483,8 @@ namespace UnityAV
                     return NativeVideoDynamicRangeKind.Hdr10;
                 case NativeVideoDynamicRange.Hlg:
                     return NativeVideoDynamicRangeKind.Hlg;
+                case NativeVideoDynamicRange.DolbyVision:
+                    return NativeVideoDynamicRangeKind.DolbyVision;
                 default:
                     return NativeVideoDynamicRangeKind.Unknown;
             }

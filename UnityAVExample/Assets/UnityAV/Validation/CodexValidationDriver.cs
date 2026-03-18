@@ -12,6 +12,7 @@ namespace UnityAV
     public class CodexValidationDriver : MonoBehaviour
     {
         private const float MinimumPlaybackAdvanceSeconds = 1.0f;
+        private const int PreviewTargetFrameRate = 120;
 
         public MediaPlayerPull Player;
         public float ValidationSeconds = 6f;
@@ -21,6 +22,7 @@ namespace UnityAV
         public string UriArgumentName = "-uri=";
         public string BackendArgumentName = "-backend=";
         public string VideoRendererArgumentName = "-videoRenderer=";
+        public string LoopArgumentName = "-loop=";
         public string ValidationSecondsArgumentName = "-validationSeconds=";
         public string StartupTimeoutSecondsArgumentName = "-startupTimeoutSeconds=";
         public string WindowWidthArgumentName = "-windowWidth=";
@@ -87,6 +89,13 @@ namespace UnityAV
                 Debug.Log("[CodexValidation] override video_renderer=" + parsedVideoRenderer);
             }
 
+            bool hasExplicitLoopValue;
+            Player.Loop = TryReadBoolArgument(LoopArgumentName, Player.Loop, out hasExplicitLoopValue);
+            if (hasExplicitLoopValue)
+            {
+                Debug.Log("[CodexValidation] override loop=" + Player.Loop);
+            }
+
             ValidationSeconds = TryReadFloatArgument(
                 ValidationSecondsArgumentName,
                 ValidationSeconds);
@@ -129,6 +138,12 @@ namespace UnityAV
             // 场景验证需要在无人值守运行时维持稳定时钟，避免失焦后被系统节流。
             Application.runInBackground = true;
             Debug.Log("[CodexValidation] runInBackground=True");
+            QualitySettings.vSyncCount = 0;
+            Application.targetFrameRate = PreviewTargetFrameRate;
+            Debug.Log(
+                "[CodexValidation] frame_pacing targetFrameRate="
+                + Application.targetFrameRate
+                + " vSyncCount=" + QualitySettings.vSyncCount);
 
             _lastLogTime = Time.realtimeSinceStartup;
             _startTime = _lastLogTime;
@@ -595,6 +610,19 @@ namespace UnityAV
             if (string.IsNullOrEmpty(value)
                 || !float.TryParse(value, out parsed)
                 || parsed <= 0f)
+            {
+                return fallback;
+            }
+
+            return parsed;
+        }
+
+        private static bool TryReadBoolArgument(string prefix, bool fallback, out bool hasExplicitValue)
+        {
+            var value = TryReadStringArgument(prefix);
+            hasExplicitValue = !string.IsNullOrEmpty(value);
+            bool parsed;
+            if (string.IsNullOrEmpty(value) || !bool.TryParse(value, out parsed))
             {
                 return fallback;
             }

@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Runtime.InteropServices;
 using System.Text;
+using DiagnosticsStopwatch = System.Diagnostics.Stopwatch;
 using UnityEngine;
 
 namespace UnityAV
@@ -15,14 +16,16 @@ namespace UnityAV
         private const int DefaultWidth = 1024;
         private const int DefaultHeight = 1024;
         private const int InvalidPlayerId = -1;
-        private const int AudioStartThresholdMilliseconds = 120;
+        private const int FileAudioStartThresholdMilliseconds = 400;
+        private const int RealtimeAudioStartThresholdMilliseconds = 120;
+        private const int StreamingAudioClipLengthSeconds = 1800;
         private const int RealtimeAudioStartupGraceMilliseconds = 750;
         private const int RealtimeAudioStartupMinimumThresholdMilliseconds = 40;
         private const int RealtimeStartupAdditionalAudioSinkDelayMilliseconds = 20;
         private const int RealtimeFfmpegAdditionalAudioSinkDelayMilliseconds = 120;
         private const double RealtimeObservedAudioClockClampSeconds = 0.180;
         private const int RealtimeAudioRingCapacityMilliseconds = 750;
-        private const int AudioBufferedCeilingMilliseconds = 80;
+        private const int FileAudioBufferedCeilingMilliseconds = 1000;
         private const int RealtimeAudioBufferedCeilingMilliseconds = 60;
         private const int MaxAudioCopyBytes = 64 * 1024;
         private const int MaxAudioCopyIterations = 16;
@@ -78,15 +81,41 @@ namespace UnityAV
 
         public struct PlayerRuntimeHealth
         {
+            public int State;
+            public int RuntimeState;
+            public int PlaybackIntent;
+            public int StopReason;
             public MediaSourceConnectionState SourceConnectionState;
             public bool IsConnected;
             public bool IsPlaying;
             public bool IsRealtime;
+            public bool CanSeek;
+            public bool IsLooping;
             public long SourcePacketCount;
             public long SourceTimeoutCount;
             public long SourceReconnectCount;
+            public double DurationSec;
             public double SourceLastActivityAgeSec;
             public double CurrentTimeSec;
+            public double ExternalTimeSec;
+        }
+
+        private enum RustAVPlayerState
+        {
+            Idle = 0,
+            Connecting = 1,
+            Ready = 2,
+            Playing = 3,
+            Paused = 4,
+            Shutdown = 5,
+            Ended = 6
+        }
+
+        private enum RustAVPlayerStopReason
+        {
+            None = 0,
+            UserStop = 1,
+            EndOfStream = 2
         }
 
         /// <summary>
@@ -187,6 +216,24 @@ namespace UnityAV
         private double _nextBufferedAudioTimeSec = -1.0;
         private double _audioPlaybackAnchorTimeSec = -1.0;
         private double _audioPlaybackAnchorDspTimeSec = -1.0;
+        private int _audioSetPositionCount;
+        private int _audioReadCallbackCount;
+        private int _audioReadUnderflowCount;
+        private int _audioLastReadRequestSamples;
+        private int _audioLastReadFilledSamples;
+        private int _audioHighWaterSamples;
+        private int _nativeBufferedAudioBytes;
+        private int _nativeBufferedAudioHighWaterBytes;
+        private int _audioLastReportedUnderflowCount;
+        private float _nextAudioDiagnosticRealtimeAt;
+        private int _videoDiagnosticUpdateCount;
+        private int _videoDiagnosticPresentedCount;
+        private long _videoDiagnosticPresentedBytes;
+        private double _updatePlayerElapsedMsAccum;
+        private double _updateVideoFrameElapsedMsAccum;
+        private double _updateAudioBufferElapsedMsAccum;
+        private float _lastVideoDiagnosticRealtimeAt = -1f;
+        private float _nextVideoDiagnosticRealtimeAt;
         private readonly object _audioLock = new object();
 
         [DllImport(NativePlugin.Name, EntryPoint = "RustAV_PlayerCreatePullRGBA")]
@@ -467,15 +514,23 @@ namespace UnityAV
 
             health = new PlayerRuntimeHealth
             {
+                State = runtimeHealth.State,
+                RuntimeState = runtimeHealth.RuntimeState,
+                PlaybackIntent = runtimeHealth.PlaybackIntent,
+                StopReason = runtimeHealth.StopReason,
                 SourceConnectionState = runtimeHealth.SourceConnectionState,
                 IsConnected = runtimeHealth.IsConnected,
                 IsPlaying = runtimeHealth.IsPlaying,
                 IsRealtime = runtimeHealth.IsRealtime,
+                CanSeek = runtimeHealth.CanSeek,
+                IsLooping = runtimeHealth.IsLooping,
                 SourcePacketCount = runtimeHealth.SourcePacketCount,
                 SourceTimeoutCount = runtimeHealth.SourceTimeoutCount,
                 SourceReconnectCount = runtimeHealth.SourceReconnectCount,
+                DurationSec = runtimeHealth.DurationSec,
                 SourceLastActivityAgeSec = runtimeHealth.SourceLastActivityAgeSec,
                 CurrentTimeSec = runtimeHealth.CurrentTimeSec,
+                ExternalTimeSec = runtimeHealth.ExternalTimeSec,
             };
             return true;
         }
@@ -698,11 +753,24 @@ namespace UnityAV
                 return;
             }
 
+            _videoDiagnosticUpdateCount += 1;
+
+            var updatePlayerStartTicks = DiagnosticsStopwatch.GetTimestamp();
             UpdatePlayer(_id);
+            _updatePlayerElapsedMsAccum += ElapsedMilliseconds(updatePlayerStartTicks);
+
+            var updateVideoStartTicks = DiagnosticsStopwatch.GetTimestamp();
             UpdateVideoFrame();
+            _updateVideoFrameElapsedMsAccum += ElapsedMilliseconds(updateVideoStartTicks);
+
+            var updateAudioStartTicks = DiagnosticsStopwatch.GetTimestamp();
             UpdateAudioBuffer();
+            _updateAudioBufferElapsedMsAccum += ElapsedMilliseconds(updateAudioStartTicks);
+            UpdatePlaybackEndState();
             RecordPositivePlaybackTimeIfNeeded();
             UpdateNativeAudioSinkDelay();
+            EmitAudioDiagnostics();
+            EmitVideoDiagnostics();
         }
 
         private void OnApplicationPause(bool pauseStatus)
@@ -755,6 +823,194 @@ namespace UnityAV
 
             _audioSource.playOnAwake = false;
             _audioSource.loop = true;
+            _audioSource.spatialBlend = 0f;
+        }
+
+        private void ResetAudioDiagnostics()
+        {
+            _audioSetPositionCount = 0;
+            _audioReadCallbackCount = 0;
+            _audioReadUnderflowCount = 0;
+            _audioLastReadRequestSamples = 0;
+            _audioLastReadFilledSamples = 0;
+            _audioHighWaterSamples = 0;
+            _nativeBufferedAudioBytes = 0;
+            _nativeBufferedAudioHighWaterBytes = 0;
+            _audioLastReportedUnderflowCount = 0;
+            _nextAudioDiagnosticRealtimeAt = 0f;
+        }
+
+        private void ResetVideoDiagnostics()
+        {
+            _videoDiagnosticUpdateCount = 0;
+            _videoDiagnosticPresentedCount = 0;
+            _videoDiagnosticPresentedBytes = 0;
+            _updatePlayerElapsedMsAccum = 0.0;
+            _updateVideoFrameElapsedMsAccum = 0.0;
+            _updateAudioBufferElapsedMsAccum = 0.0;
+            _lastVideoDiagnosticRealtimeAt = -1f;
+            _nextVideoDiagnosticRealtimeAt = 0f;
+        }
+
+        private static double ElapsedMilliseconds(long startTicks)
+        {
+            return (DiagnosticsStopwatch.GetTimestamp() - startTicks) * 1000.0
+                / DiagnosticsStopwatch.Frequency;
+        }
+
+        private void ObserveNativeBufferedAudioBytes(int bufferedBytes)
+        {
+            var normalized = Math.Max(0, bufferedBytes);
+            _nativeBufferedAudioBytes = normalized;
+            _nativeBufferedAudioHighWaterBytes =
+                Math.Max(_nativeBufferedAudioHighWaterBytes, normalized);
+        }
+
+        private double BufferedAudioSecondsFromBytes(int bufferedBytes)
+        {
+            if (bufferedBytes <= 0
+                || _audioSampleRate <= 0
+                || _audioChannels <= 0
+                || _audioBytesPerSample <= 0)
+            {
+                return 0.0;
+            }
+
+            var bytesPerSecond = _audioSampleRate * _audioChannels * _audioBytesPerSample;
+            if (bytesPerSecond <= 0)
+            {
+                return 0.0;
+            }
+
+            return (double)bufferedBytes / bytesPerSecond;
+        }
+
+        private void EmitAudioDiagnostics()
+        {
+            if (!EnableAudio || _audioSampleRate <= 0 || _audioChannels <= 0)
+            {
+                return;
+            }
+
+            var now = UnityEngine.Time.realtimeSinceStartup;
+            if (now < _nextAudioDiagnosticRealtimeAt)
+            {
+                return;
+            }
+
+            int callbackCount;
+            int underflowCount;
+            int requestedSamples;
+            int filledSamples;
+            int bufferedSamples;
+            int highWaterSamples;
+            lock (_audioLock)
+            {
+                callbackCount = _audioReadCallbackCount;
+                underflowCount = _audioReadUnderflowCount;
+                requestedSamples = _audioLastReadRequestSamples;
+                filledSamples = _audioLastReadFilledSamples;
+                bufferedSamples = _audioBufferedSamples;
+                highWaterSamples = _audioHighWaterSamples;
+            }
+
+            var shouldLog = StartupElapsedSeconds <= 20f
+                || callbackCount <= 0
+                || underflowCount != _audioLastReportedUnderflowCount;
+            if (!shouldLog)
+            {
+                _nextAudioDiagnosticRealtimeAt = now + 1f;
+                return;
+            }
+
+            var bufferedMilliseconds = 0.0;
+            var highWaterMilliseconds = 0.0;
+            var nativeBufferedMilliseconds =
+                BufferedAudioSecondsFromBytes(_nativeBufferedAudioBytes) * 1000.0;
+            var nativeHighWaterMilliseconds =
+                BufferedAudioSecondsFromBytes(_nativeBufferedAudioHighWaterBytes) * 1000.0;
+            var scale = _audioSampleRate * _audioChannels;
+            if (scale > 0)
+            {
+                bufferedMilliseconds = bufferedSamples * 1000.0 / scale;
+                highWaterMilliseconds = highWaterSamples * 1000.0 / scale;
+            }
+
+            int dspBufferLength;
+            int dspBufferCount;
+            AudioSettings.GetDSPBufferSize(out dspBufferLength, out dspBufferCount);
+
+            Debug.Log(
+                "[MediaPlayerPull] audio_diag callbacks="
+                + callbackCount
+                + " underflows=" + underflowCount
+                + " last_request=" + requestedSamples
+                + " last_filled=" + filledSamples
+                + " native_buffered_ms=" + nativeBufferedMilliseconds.ToString("F1")
+                + " native_high_water_ms=" + nativeHighWaterMilliseconds.ToString("F1")
+                + " buffered_ms=" + bufferedMilliseconds.ToString("F1")
+                + " high_water_ms=" + highWaterMilliseconds.ToString("F1")
+                + " clip_hz=" + _audioSampleRate
+                + " output_hz=" + AudioSettings.outputSampleRate
+                + " dsp_buffer=" + dspBufferLength + "x" + dspBufferCount
+                + " set_position_count=" + _audioSetPositionCount
+                + " is_playing=" + (_audioSource != null && _audioSource.isPlaying));
+
+            _audioLastReportedUnderflowCount = underflowCount;
+            _nextAudioDiagnosticRealtimeAt = now + 1f;
+        }
+
+        private void EmitVideoDiagnostics()
+        {
+            var now = UnityEngine.Time.realtimeSinceStartup;
+            if (_lastVideoDiagnosticRealtimeAt < 0f)
+            {
+                _lastVideoDiagnosticRealtimeAt = now;
+                _nextVideoDiagnosticRealtimeAt = now + 1f;
+                return;
+            }
+
+            if (now < _nextVideoDiagnosticRealtimeAt)
+            {
+                return;
+            }
+
+            var elapsedSeconds = Math.Max(0.001f, now - _lastVideoDiagnosticRealtimeAt);
+            var updateFps = _videoDiagnosticUpdateCount / elapsedSeconds;
+            var presentedFps = _videoDiagnosticPresentedCount / elapsedSeconds;
+            var updatePlayerAverageMs = _videoDiagnosticUpdateCount > 0
+                ? _updatePlayerElapsedMsAccum / _videoDiagnosticUpdateCount
+                : 0.0;
+            var updateVideoAverageMs = _videoDiagnosticUpdateCount > 0
+                ? _updateVideoFrameElapsedMsAccum / _videoDiagnosticUpdateCount
+                : 0.0;
+            var updateAudioAverageMs = _videoDiagnosticUpdateCount > 0
+                ? _updateAudioBufferElapsedMsAccum / _videoDiagnosticUpdateCount
+                : 0.0;
+            var uploadMegabytesPerSecond = elapsedSeconds > 0f
+                ? (_videoDiagnosticPresentedBytes / 1024.0 / 1024.0) / elapsedSeconds
+                : 0.0;
+
+            Debug.Log(
+                "[MediaPlayerPull] video_diag update_fps="
+                + updateFps.ToString("F1")
+                + " presented_fps=" + presentedFps.ToString("F1")
+                + " update_player_ms_avg=" + updatePlayerAverageMs.ToString("F2")
+                + " update_video_ms_avg=" + updateVideoAverageMs.ToString("F2")
+                + " update_audio_ms_avg=" + updateAudioAverageMs.ToString("F2")
+                + " upload_mib_per_sec=" + uploadMegabytesPerSecond.ToString("F1")
+                + " frame_index=" + _lastFrameIndex
+                + " frame_time=" + _lastPresentedVideoTimeSec.ToString("F3")
+                + " texture=" + HasPresentedVideoFrame);
+
+            _videoDiagnosticUpdateCount = 0;
+            _videoDiagnosticPresentedCount = 0;
+            _videoDiagnosticPresentedBytes = 0;
+            _updatePlayerElapsedMsAccum = 0.0;
+            _updateVideoFrameElapsedMsAccum = 0.0;
+            _updateAudioBufferElapsedMsAccum = 0.0;
+            _lastVideoDiagnosticRealtimeAt = now;
+            _nextVideoDiagnosticRealtimeAt = now + 1f;
         }
 
         private static bool ValidatePlayerId(int id)
@@ -786,6 +1042,8 @@ namespace UnityAV
             _targetTexture.Apply(false, false);
             _lastFrameIndex = meta.FrameIndex;
             _lastPresentedVideoTimeSec = meta.TimeSec;
+            _videoDiagnosticPresentedCount += 1;
+            _videoDiagnosticPresentedBytes += meta.DataSize;
             if (_firstVideoFrameRealtimeAt < 0f)
             {
                 _firstVideoFrameRealtimeAt = UnityEngine.Time.realtimeSinceStartup;
@@ -804,16 +1062,31 @@ namespace UnityAV
                 return;
             }
 
+            var latestNativeBufferedBytes = 0;
             for (var iteration = 0; iteration < MaxAudioCopyIterations; iteration++)
             {
                 RustAVAudioMeta meta;
                 var status = GetAudioMetaPCM(_id, out meta);
                 if (status <= 0 || meta.BufferedBytes <= 0)
                 {
+                    latestNativeBufferedBytes = 0;
                     break;
                 }
 
                 if (!EnsureAudioFormat(meta))
+                {
+                    break;
+                }
+
+                latestNativeBufferedBytes = meta.BufferedBytes;
+
+                var maxBufferedSamples = CalculateBufferedAudioCeilingSamples();
+                var bufferedSamples = 0;
+                lock (_audioLock)
+                {
+                    bufferedSamples = _audioBufferedSamples;
+                }
+                if (maxBufferedSamples > 0 && bufferedSamples >= maxBufferedSamples)
                 {
                     break;
                 }
@@ -825,6 +1098,17 @@ namespace UnityAV
                 }
 
                 var bytesToCopy = Math.Min(meta.BufferedBytes, MaxAudioCopyBytes);
+                if (maxBufferedSamples > 0)
+                {
+                    var remainingSamples = Math.Max(0, maxBufferedSamples - bufferedSamples);
+                    var remainingBytes = remainingSamples * meta.BytesPerSample;
+                    if (remainingBytes <= 0)
+                    {
+                        break;
+                    }
+
+                    bytesToCopy = Math.Min(bytesToCopy, remainingBytes);
+                }
                 bytesToCopy -= bytesToCopy % bytesPerInterleavedSample;
                 if (bytesToCopy <= 0)
                 {
@@ -842,6 +1126,8 @@ namespace UnityAV
                     break;
                 }
 
+                latestNativeBufferedBytes = Math.Max(0, meta.BufferedBytes - copied);
+
                 var sampleCount = copied / meta.BytesPerSample;
                 if (_audioFloats.Length != sampleCount)
                 {
@@ -857,7 +1143,55 @@ namespace UnityAV
                 }
             }
 
+            ObserveNativeBufferedAudioBytes(latestNativeBufferedBytes);
             TryStartAudioSource();
+        }
+
+        private void UpdatePlaybackEndState()
+        {
+            if (_isRealtimeSource || !ValidatePlayerId(_id) || _audioSource == null || !_audioSource.isPlaying)
+            {
+                return;
+            }
+
+            PlayerRuntimeHealth health;
+            if (!TryGetRuntimeHealth(out health) || health.IsLooping)
+            {
+                return;
+            }
+
+            var reachedEndOfStream = health.StopReason == (int)RustAVPlayerStopReason.EndOfStream
+                || health.State == (int)RustAVPlayerState.Ended
+                || health.RuntimeState == (int)RustAVPlayerState.Ended
+                || (!health.IsPlaying
+                    && health.DurationSec > 0.0
+                    && health.CurrentTimeSec >= health.DurationSec - 0.050);
+            if (!reachedEndOfStream)
+            {
+                return;
+            }
+
+            var bufferedSamples = 0;
+            lock (_audioLock)
+            {
+                bufferedSamples = _audioBufferedSamples;
+            }
+
+            if (_nativeBufferedAudioBytes > 0 || bufferedSamples > 0)
+            {
+                return;
+            }
+
+            _audioSource.Stop();
+            ClearAudioBuffer();
+            _playRequested = false;
+            Debug.Log(
+                "[MediaPlayerPull] playback_ended unity_audio_stopped current_time="
+                + health.CurrentTimeSec.ToString("F3")
+                + " duration="
+                + health.DurationSec.ToString("F3")
+                + " stop_reason="
+                + health.StopReason);
         }
 
         private bool EnsureAudioFormat(RustAVAudioMeta meta)
@@ -896,10 +1230,12 @@ namespace UnityAV
                 _audioReadIndex = 0;
                 _audioWriteIndex = 0;
                 _audioBufferedSamples = 0;
+                _audioHighWaterSamples = 0;
                 _latestQueuedAudioEndTimeSec = -1.0;
                 _nextBufferedAudioTimeSec = -1.0;
             }
             ResetAudioPlaybackAnchor();
+            ResetAudioDiagnostics();
 
             if (_audioClip != null)
             {
@@ -908,7 +1244,7 @@ namespace UnityAV
 
             _audioClip = AudioClip.Create(
                 Uri + "_PullAudio",
-                _audioSampleRate,
+                _audioSampleRate * StreamingAudioClipLengthSeconds,
                 _audioChannels,
                 _audioSampleRate,
                 true,
@@ -983,6 +1319,7 @@ namespace UnityAV
                 _audioWriteIndex = (_audioWriteIndex + sampleCount) % _audioRing.Length;
                 _audioBufferedSamples += sampleCount;
                 TrimBufferedAudioSamplesIfNeeded();
+                _audioHighWaterSamples = Math.Max(_audioHighWaterSamples, _audioBufferedSamples);
                 RefreshBufferedAudioTailLocked();
             }
         }
@@ -1016,7 +1353,7 @@ namespace UnityAV
 
             var steadyStateMilliseconds = _isRealtimeSource
                 ? RealtimeAudioBufferedCeilingMilliseconds
-                : AudioBufferedCeilingMilliseconds;
+                : FileAudioBufferedCeilingMilliseconds;
             var steadyStateSamples = (_audioSampleRate * _audioChannels * steadyStateMilliseconds) / 1000;
             steadyStateSamples = Math.Max(steadyStateSamples, _audioChannels);
 
@@ -1025,7 +1362,7 @@ namespace UnityAV
                 return steadyStateSamples;
             }
 
-            return Math.Max(steadyStateSamples, CalculateAudioStartThresholdSamples());
+            return CalculateAudioStartThresholdSamples();
         }
 
         private void OnAudioRead(float[] data)
@@ -1039,8 +1376,12 @@ namespace UnityAV
 
             lock (_audioLock)
             {
+                _audioReadCallbackCount += 1;
+                _audioLastReadRequestSamples = data.Length;
                 if (_audioBufferedSamples <= 0 || _audioRing == null || _audioRing.Length == 0)
                 {
+                    _audioLastReadFilledSamples = 0;
+                    _audioReadUnderflowCount += 1;
                     return;
                 }
 
@@ -1056,6 +1397,11 @@ namespace UnityAV
 
                 _audioReadIndex = (_audioReadIndex + samplesToRead) % _audioRing.Length;
                 _audioBufferedSamples -= samplesToRead;
+                _audioLastReadFilledSamples = samplesToRead;
+                if (samplesToRead < data.Length)
+                {
+                    _audioReadUnderflowCount += 1;
+                }
                 AdvanceBufferedAudioHeadLocked(samplesToRead);
                 RefreshBufferedAudioTailLocked();
             }
@@ -1063,6 +1409,14 @@ namespace UnityAV
 
         private void OnAudioSetPosition(int position)
         {
+            _audioSetPositionCount += 1;
+            if (_audioSetPositionCount <= 3)
+            {
+                Debug.Log(
+                    "[MediaPlayerPull] audio_set_position position="
+                    + position
+                    + " count=" + _audioSetPositionCount);
+            }
         }
 
         private void ClearAudioBuffer()
@@ -1072,6 +1426,7 @@ namespace UnityAV
                 _audioReadIndex = 0;
                 _audioWriteIndex = 0;
                 _audioBufferedSamples = 0;
+                _audioHighWaterSamples = 0;
                 _latestQueuedAudioEndTimeSec = -1.0;
                 _nextBufferedAudioTimeSec = -1.0;
                 if (_audioRing != null && _audioRing.Length > 0)
@@ -1081,6 +1436,7 @@ namespace UnityAV
             }
 
             ResetAudioPlaybackAnchor();
+            ResetAudioDiagnostics();
             UpdateNativeAudioSinkDelay();
         }
 
@@ -1129,8 +1485,11 @@ namespace UnityAV
 
         private int CalculateAudioStartThresholdSamples()
         {
+            var thresholdMilliseconds = _isRealtimeSource
+                ? RealtimeAudioStartThresholdMilliseconds
+                : FileAudioStartThresholdMilliseconds;
             var thresholdSamples = (_audioSampleRate * _audioChannels
-                * AudioStartThresholdMilliseconds) / 1000;
+                * thresholdMilliseconds) / 1000;
             if (!_isRealtimeSource)
             {
                 return thresholdSamples;
@@ -1194,6 +1553,7 @@ namespace UnityAV
             var audioStarted = _audioSource != null && _audioSource.isPlaying;
             if (EnableAudio && _audioSampleRate > 0 && _audioChannels > 0)
             {
+                delaySec += BufferedAudioSecondsFromBytes(_nativeBufferedAudioBytes);
                 if (!_isRealtimeSource || audioStarted)
                 {
                     lock (_audioLock)
@@ -1315,6 +1675,7 @@ namespace UnityAV
             _firstAudioStartRealtimeAt = -1f;
             _firstPositivePlaybackTimeRealtimeAt = -1f;
             ResetAudioPlaybackAnchor();
+            ResetVideoDiagnostics();
         }
 
         private void ReleaseNativePlayer()
@@ -1367,6 +1728,7 @@ namespace UnityAV
             }
 
             _videoBytes = new byte[0];
+            _lastFrameIndex = -1;
             _lastPresentedVideoTimeSec = -1.0;
             _audioBytes = new byte[0];
             _audioFloats = new float[0];
@@ -1378,8 +1740,11 @@ namespace UnityAV
                 _audioReadIndex = 0;
                 _audioWriteIndex = 0;
                 _audioBufferedSamples = 0;
+                _audioHighWaterSamples = 0;
                 _nextBufferedAudioTimeSec = -1.0;
             }
+            ResetAudioDiagnostics();
+            ResetVideoDiagnostics();
         }
 
         private int CreateNativePlayer(string uri)
