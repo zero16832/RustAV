@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Runtime.InteropServices;
 using System.Text;
+using DiagnosticsStopwatch = System.Diagnostics.Stopwatch;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 
@@ -17,6 +18,19 @@ namespace UnityAV
         private const int DefaultWidth = 1024;
         private const int DefaultHeight = 1024;
         private const int InvalidPlayerId = -1;
+        private const int FileAudioStartThresholdMilliseconds = 400;
+        private const int RealtimeAudioStartThresholdMilliseconds = 120;
+        private const int StreamingAudioClipLengthSeconds = 1800;
+        private const int RealtimeAudioStartupGraceMilliseconds = 750;
+        private const int RealtimeAudioStartupMinimumThresholdMilliseconds = 40;
+        private const int RealtimeStartupAdditionalAudioSinkDelayMilliseconds = 20;
+        private const int RealtimeFfmpegAdditionalAudioSinkDelayMilliseconds = 120;
+        private const int RealtimeAudioRingCapacityMilliseconds = 750;
+        private const int FileAudioBufferedCeilingMilliseconds = 1000;
+        private const int RealtimeAudioBufferedCeilingMilliseconds = 60;
+        private const int FileNativeVideoStartupWarmupStableFrames = 4;
+        private const int MaxAudioCopyBytes = 64 * 1024;
+        private const int MaxAudioCopyIterations = 16;
 
         public enum NativeVideoPresentationPathKind
         {
@@ -88,6 +102,67 @@ namespace UnityAV
             public uint Flags;
         }
 
+        public struct NativeVideoFrameCadenceSnapshot
+        {
+            public long AcquireAttemptCount;
+            public long AcquireMissCount;
+            public long PresentCount;
+            public long SampleCount;
+            public long DuplicateCount;
+            public long MaxDuplicateStreak;
+            public long MaxAcquireMissStreak;
+            public long SkippedFrameCount;
+            public long NonMonotonicCount;
+            public long LastFrameIndexDelta;
+            public double LastFrameTimeDeltaSec;
+            public double LastRealtimeDeltaSec;
+            public double MinFrameTimeDeltaSec;
+            public double MaxFrameTimeDeltaSec;
+            public double AvgFrameTimeDeltaSec;
+            public double MinRealtimeDeltaSec;
+            public double MaxRealtimeDeltaSec;
+            public double AvgRealtimeDeltaSec;
+            public long PresentationFailureCount;
+            public long RenderEventPassCount;
+            public long DirectBindCount;
+            public long DirectShaderCount;
+            public long ComputeCount;
+        }
+
+        public struct NativeVideoUpdateTimingSnapshot
+        {
+            public long UpdateCount;
+            public double UpdatePlayerElapsedMsAvg;
+            public double UpdatePlayerElapsedMsMax;
+            public double UpdateNativeVideoFrameElapsedMsAvg;
+            public double UpdateNativeVideoFrameElapsedMsMax;
+            public double UpdateAudioBufferElapsedMsAvg;
+            public double UpdateAudioBufferElapsedMsMax;
+        }
+
+        public struct NativeVideoPresentationTelemetrySnapshot
+        {
+            public long RenderEventPassAttemptCount;
+            public long RenderEventPassSuccessCount;
+            public long DirectBindAttemptCount;
+            public long DirectBindSuccessCount;
+            public long DirectShaderAttemptCount;
+            public long DirectShaderSuccessCount;
+            public long DirectShaderSourcePlaneTexturesUnsupportedCount;
+            public long DirectShaderShaderUnavailableCount;
+            public long DirectShaderAcquireSourcePlaneTexturesFailureCount;
+            public long DirectShaderPlaneTexturesUsabilityFailureCount;
+            public long DirectShaderMaterialFailureCount;
+            public long DirectShaderExceptionCount;
+            public long ComputeAttemptCount;
+            public long ComputeSuccessCount;
+            public long ComputeSourcePlaneTexturesUnsupportedCount;
+            public long ComputeShaderUnavailableCount;
+            public long ComputeAcquireSourcePlaneTexturesFailureCount;
+            public long ComputePlaneTexturesUsabilityFailureCount;
+            public long ComputeExceptionCount;
+        }
+
         public struct NativeVideoColorInfo
         {
             public NativeVideoColorRangeKind Range;
@@ -138,6 +213,24 @@ namespace UnityAV
             public uint Flags;
         }
 
+        private enum RustAVAudioSampleFormat
+        {
+            Unknown = 0,
+            Float32 = 1
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RustAVAudioMeta
+        {
+            public int SampleRate;
+            public int Channels;
+            public int BytesPerSample;
+            public int SampleFormat;
+            public int BufferedBytes;
+            public double TimeSec;
+            public long FrameIndex;
+        }
+
         /// <summary>
         /// The uri of the media to stream
         /// </summary>
@@ -158,6 +251,11 @@ namespace UnityAV
         /// Should the media be looped?
         /// </summary>
         public bool Loop;
+
+        /// <summary>
+        /// 是否输出逐帧的 native video 取帧节奏日志。
+        /// </summary>
+        public bool TraceNativeVideoCadence;
 
         /// <summary>
         /// Should the media play as soon as it's loaded?
@@ -181,6 +279,23 @@ namespace UnityAV
         /// The material to apply any streaming video to
         /// </summary>
         public Material TargetMaterial;
+
+        /// <summary>
+        /// 是否启用 Unity 音频输出。
+        /// </summary>
+        [Header("Audio Properties:")]
+        public bool EnableAudio = true;
+
+        /// <summary>
+        /// 是否在缓冲足够后自动启动 Unity 音频播放。
+        /// </summary>
+        public bool AutoStartAudio = true;
+
+        /// <summary>
+        /// 实时流额外补偿的音频输出延迟。
+        /// </summary>
+        [Range(0, 500)]
+        public int RealtimeAdditionalAudioSinkDelayMilliseconds = 60;
 
         /// <summary>
         /// 是否优先尝试 NativeVideo / 硬解增强路径。
@@ -249,8 +364,66 @@ namespace UnityAV
         private NativeVideoFrameInfo _lastNativeVideoFrameInfo;
         private bool _hasLastNativeVideoFrameInfo;
         private long _lastAcquiredNativeFrameIndex = -1;
+        private float _lastNativeVideoFrameAcquireRealtimeAt = -1f;
+        private long _nativeVideoFrameAcquireAttemptCount;
+        private long _nativeVideoFrameAcquireMissCount;
         private long _nativeVideoFrameAcquireCount;
         private long _nativeVideoFrameReleaseCount;
+        private long _nativeVideoFrameDuplicateAcquireCount;
+        private long _nativeVideoFrameConsecutiveDuplicateCount;
+        private long _nativeVideoFrameMaxConsecutiveDuplicateCount;
+        private long _nativeVideoFrameConsecutiveMissCount;
+        private long _nativeVideoFrameMaxConsecutiveMissCount;
+        private long _nativeVideoFramePresentedCount;
+        private long _nativeVideoFramePresentedLifetimeCount;
+        private long _nativeVideoFramePresentationFailureCount;
+        private long _nativeVideoFrameRenderEventPassCount;
+        private long _nativeVideoFrameDirectBindPresentCount;
+        private long _nativeVideoFrameDirectShaderPresentCount;
+        private long _nativeVideoFrameComputePresentCount;
+        private long _nativeVideoFrameSkippedFrameCount;
+        private long _nativeVideoFrameNonMonotonicCount;
+        private long _nativeVideoFrameCadenceSampleCount;
+        private long _nativeVideoFrameLastIndexDelta;
+        private double _nativeVideoFrameLastTimeDeltaSec;
+        private double _nativeVideoFrameLastRealtimeDeltaSec;
+        private int _nativeVideoStartupWarmupStableFrameCount;
+        private long _nativeVideoStartupWarmupSuppressedFrameCount;
+        private bool _nativeVideoStartupWarmupCompleted;
+        private double _nativeVideoFrameTimeDeltaSumSec;
+        private double _nativeVideoFrameTimeDeltaMinSec = double.PositiveInfinity;
+        private double _nativeVideoFrameTimeDeltaMaxSec;
+        private double _nativeVideoFrameRealtimeDeltaSumSec;
+        private double _nativeVideoFrameRealtimeDeltaMinSec = double.PositiveInfinity;
+        private double _nativeVideoFrameRealtimeDeltaMaxSec;
+        private long _nativeVideoUpdateCount;
+        private float _lastNativeVideoUpdateRealtimeAt = -1f;
+        private long _nativeVideoStartupUpdateLogCount;
+        private double _nativeVideoUpdatePlayerElapsedMsSum;
+        private double _nativeVideoUpdatePlayerElapsedMsMax;
+        private double _nativeVideoUpdateNativeVideoFrameElapsedMsSum;
+        private double _nativeVideoUpdateNativeVideoFrameElapsedMsMax;
+        private double _nativeVideoUpdateAudioBufferElapsedMsSum;
+        private double _nativeVideoUpdateAudioBufferElapsedMsMax;
+        private long _nativeVideoRenderEventPassAttemptCount;
+        private long _nativeVideoRenderEventPassSuccessCount;
+        private long _nativeVideoDirectBindAttemptCount;
+        private long _nativeVideoDirectBindSuccessCount;
+        private long _nativeVideoDirectShaderAttemptCount;
+        private long _nativeVideoDirectShaderSuccessCount;
+        private long _nativeVideoDirectShaderSourcePlaneTexturesUnsupportedCount;
+        private long _nativeVideoDirectShaderShaderUnavailableCount;
+        private long _nativeVideoDirectShaderAcquireSourcePlaneTexturesFailureCount;
+        private long _nativeVideoDirectShaderPlaneTexturesUsabilityFailureCount;
+        private long _nativeVideoDirectShaderMaterialFailureCount;
+        private long _nativeVideoDirectShaderExceptionCount;
+        private long _nativeVideoComputeAttemptCount;
+        private long _nativeVideoComputeSuccessCount;
+        private long _nativeVideoComputeSourcePlaneTexturesUnsupportedCount;
+        private long _nativeVideoComputeShaderUnavailableCount;
+        private long _nativeVideoComputeAcquireSourcePlaneTexturesFailureCount;
+        private long _nativeVideoComputePlaneTexturesUsabilityFailureCount;
+        private long _nativeVideoComputeExceptionCount;
         private bool _nativeVideoBindingWarningIssued;
         private bool _nativeVideoDirectShaderWarningIssued;
         private bool _nativeVideoComputeWarningIssued;
@@ -277,6 +450,21 @@ namespace UnityAV
         private int _nativeVideoComputeKernel = -1;
         private Shader _originalTargetMaterialShader;
         private bool _capturedTargetMaterialShader;
+        private bool _isRealtimeSource;
+        private AudioSource _audioSource;
+        private AudioClip _audioClip;
+        private byte[] _audioBytes = new byte[0];
+        private float[] _audioFloats = new float[0];
+        private float[] _audioRing = new float[0];
+        private int _audioReadIndex;
+        private int _audioWriteIndex;
+        private int _audioBufferedSamples;
+        private int _audioChannels;
+        private int _audioSampleRate;
+        private int _audioBytesPerSample;
+        private int _nativeBufferedAudioBytes;
+        private readonly object _audioLock = new object();
+
 
         private static readonly int UseNativeVideoPlaneTexturesPropertyId =
             Shader.PropertyToID("_UseNativeVideoPlaneTextures");
@@ -508,6 +696,15 @@ namespace UnityAV
         [DllImport(NativePlugin.Name, EntryPoint = "RustAV_PlayerSetLoop")]
         private static extern int SetLoop(int id, bool loop);
 
+        [DllImport(NativePlugin.Name, EntryPoint = "RustAV_PlayerSetAudioSinkDelaySeconds")]
+        private static extern int SetAudioSinkDelaySeconds(int id, double delaySec);
+
+        [DllImport(NativePlugin.Name, EntryPoint = "RustAV_PlayerGetAudioMetaPCM")]
+        private static extern int GetAudioMetaPCM(int id, out RustAVAudioMeta outMeta);
+
+        [DllImport(NativePlugin.Name, EntryPoint = "RustAV_PlayerCopyAudioPCM")]
+        private static extern int CopyAudioPCM(int id, byte[] destination, int destinationLength);
+
         [DllImport(NativePlugin.Name, EntryPoint = "RustAV_PlayerGetBackendKind")]
         private static extern int GetPlayerBackendKind(int id);
 
@@ -549,6 +746,8 @@ namespace UnityAV
             }
 
             _playRequested = true;
+            TryStartAudioSource();
+            UpdateNativeAudioSinkDelay();
         }
 
         /// <summary>
@@ -572,6 +771,12 @@ namespace UnityAV
             }
 
             _playRequested = false;
+            if (_audioSource != null)
+            {
+                _audioSource.Pause();
+            }
+
+            UpdateNativeAudioSinkDelay();
         }
 
         /// <summary>
@@ -642,6 +847,15 @@ namespace UnityAV
             {
                 throw new Exception($"Failed to seek with error {result}");
             }
+
+            ClearAudioBuffer();
+            if (_audioSource != null)
+            {
+                _audioSource.Stop();
+            }
+
+            UpdateNativeAudioSinkDelay();
+            TryStartAudioSource();
         }
 
         public bool TryGetRuntimeHealth(out PlayerRuntimeHealth health)
@@ -963,6 +1177,160 @@ namespace UnityAV
             return _hasLastNativeVideoFrameInfo;
         }
 
+        public bool TryTakeNativeVideoFrameCadenceSnapshot(
+            out NativeVideoFrameCadenceSnapshot snapshot)
+        {
+            snapshot = default(NativeVideoFrameCadenceSnapshot);
+            if (_nativeVideoFrameAcquireAttemptCount <= 0
+                && _nativeVideoFrameAcquireMissCount <= 0
+                && _nativeVideoFramePresentedCount <= 0
+                && _nativeVideoFrameCadenceSampleCount <= 0
+                && _nativeVideoFrameDuplicateAcquireCount <= 0
+                && _nativeVideoFrameSkippedFrameCount <= 0
+                && _nativeVideoFrameNonMonotonicCount <= 0
+                && _nativeVideoFramePresentationFailureCount <= 0
+                && _nativeVideoFrameRenderEventPassCount <= 0
+                && _nativeVideoFrameDirectBindPresentCount <= 0
+                && _nativeVideoFrameDirectShaderPresentCount <= 0
+                && _nativeVideoFrameComputePresentCount <= 0)
+            {
+                return false;
+            }
+
+            snapshot = new NativeVideoFrameCadenceSnapshot
+            {
+                AcquireAttemptCount = _nativeVideoFrameAcquireAttemptCount,
+                AcquireMissCount = _nativeVideoFrameAcquireMissCount,
+                PresentCount = _nativeVideoFramePresentedCount,
+                SampleCount = _nativeVideoFrameCadenceSampleCount,
+                DuplicateCount = _nativeVideoFrameDuplicateAcquireCount,
+                MaxDuplicateStreak = _nativeVideoFrameMaxConsecutiveDuplicateCount,
+                MaxAcquireMissStreak = _nativeVideoFrameMaxConsecutiveMissCount,
+                SkippedFrameCount = _nativeVideoFrameSkippedFrameCount,
+                NonMonotonicCount = _nativeVideoFrameNonMonotonicCount,
+                LastFrameIndexDelta = _nativeVideoFrameLastIndexDelta,
+                LastFrameTimeDeltaSec = _nativeVideoFrameLastTimeDeltaSec,
+                LastRealtimeDeltaSec = _nativeVideoFrameLastRealtimeDeltaSec,
+                MinFrameTimeDeltaSec = double.IsPositiveInfinity(_nativeVideoFrameTimeDeltaMinSec)
+                    ? 0.0
+                    : _nativeVideoFrameTimeDeltaMinSec,
+                MaxFrameTimeDeltaSec = _nativeVideoFrameTimeDeltaMaxSec,
+                AvgFrameTimeDeltaSec = _nativeVideoFrameCadenceSampleCount > 0
+                    ? _nativeVideoFrameTimeDeltaSumSec / _nativeVideoFrameCadenceSampleCount
+                    : 0.0,
+                MinRealtimeDeltaSec = double.IsPositiveInfinity(_nativeVideoFrameRealtimeDeltaMinSec)
+                    ? 0.0
+                    : _nativeVideoFrameRealtimeDeltaMinSec,
+                MaxRealtimeDeltaSec = _nativeVideoFrameRealtimeDeltaMaxSec,
+                AvgRealtimeDeltaSec = _nativeVideoFrameCadenceSampleCount > 0
+                    ? _nativeVideoFrameRealtimeDeltaSumSec / _nativeVideoFrameCadenceSampleCount
+                    : 0.0,
+                PresentationFailureCount = _nativeVideoFramePresentationFailureCount,
+                RenderEventPassCount = _nativeVideoFrameRenderEventPassCount,
+                DirectBindCount = _nativeVideoFrameDirectBindPresentCount,
+                DirectShaderCount = _nativeVideoFrameDirectShaderPresentCount,
+                ComputeCount = _nativeVideoFrameComputePresentCount
+            };
+
+            ResetNativeVideoFrameCadenceStats();
+            return true;
+        }
+
+        public bool TryTakeNativeVideoUpdateTimingSnapshot(
+            out NativeVideoUpdateTimingSnapshot snapshot)
+        {
+            snapshot = default(NativeVideoUpdateTimingSnapshot);
+            if (_nativeVideoUpdateCount <= 0
+                && _nativeVideoUpdatePlayerElapsedMsSum <= 0.0
+                && _nativeVideoUpdateNativeVideoFrameElapsedMsSum <= 0.0
+                && _nativeVideoUpdateAudioBufferElapsedMsSum <= 0.0)
+            {
+                return false;
+            }
+
+            snapshot = new NativeVideoUpdateTimingSnapshot
+            {
+                UpdateCount = _nativeVideoUpdateCount,
+                UpdatePlayerElapsedMsAvg = _nativeVideoUpdateCount > 0
+                    ? _nativeVideoUpdatePlayerElapsedMsSum / _nativeVideoUpdateCount
+                    : 0.0,
+                UpdatePlayerElapsedMsMax = _nativeVideoUpdatePlayerElapsedMsMax,
+                UpdateNativeVideoFrameElapsedMsAvg = _nativeVideoUpdateCount > 0
+                    ? _nativeVideoUpdateNativeVideoFrameElapsedMsSum / _nativeVideoUpdateCount
+                    : 0.0,
+                UpdateNativeVideoFrameElapsedMsMax = _nativeVideoUpdateNativeVideoFrameElapsedMsMax,
+                UpdateAudioBufferElapsedMsAvg = _nativeVideoUpdateCount > 0
+                    ? _nativeVideoUpdateAudioBufferElapsedMsSum / _nativeVideoUpdateCount
+                    : 0.0,
+                UpdateAudioBufferElapsedMsMax = _nativeVideoUpdateAudioBufferElapsedMsMax,
+            };
+
+            ResetNativeVideoUpdateTimingStats();
+            return true;
+        }
+
+        public bool TryTakeNativeVideoPresentationTelemetrySnapshot(
+            out NativeVideoPresentationTelemetrySnapshot snapshot)
+        {
+            snapshot = default(NativeVideoPresentationTelemetrySnapshot);
+            if (_nativeVideoRenderEventPassAttemptCount <= 0
+                && _nativeVideoRenderEventPassSuccessCount <= 0
+                && _nativeVideoDirectBindAttemptCount <= 0
+                && _nativeVideoDirectBindSuccessCount <= 0
+                && _nativeVideoDirectShaderAttemptCount <= 0
+                && _nativeVideoDirectShaderSuccessCount <= 0
+                && _nativeVideoDirectShaderSourcePlaneTexturesUnsupportedCount <= 0
+                && _nativeVideoDirectShaderShaderUnavailableCount <= 0
+                && _nativeVideoDirectShaderAcquireSourcePlaneTexturesFailureCount <= 0
+                && _nativeVideoDirectShaderPlaneTexturesUsabilityFailureCount <= 0
+                && _nativeVideoDirectShaderMaterialFailureCount <= 0
+                && _nativeVideoDirectShaderExceptionCount <= 0
+                && _nativeVideoComputeAttemptCount <= 0
+                && _nativeVideoComputeSuccessCount <= 0
+                && _nativeVideoComputeSourcePlaneTexturesUnsupportedCount <= 0
+                && _nativeVideoComputeShaderUnavailableCount <= 0
+                && _nativeVideoComputeAcquireSourcePlaneTexturesFailureCount <= 0
+                && _nativeVideoComputePlaneTexturesUsabilityFailureCount <= 0
+                && _nativeVideoComputeExceptionCount <= 0)
+            {
+                return false;
+            }
+
+            snapshot = new NativeVideoPresentationTelemetrySnapshot
+            {
+                RenderEventPassAttemptCount = _nativeVideoRenderEventPassAttemptCount,
+                RenderEventPassSuccessCount = _nativeVideoRenderEventPassSuccessCount,
+                DirectBindAttemptCount = _nativeVideoDirectBindAttemptCount,
+                DirectBindSuccessCount = _nativeVideoDirectBindSuccessCount,
+                DirectShaderAttemptCount = _nativeVideoDirectShaderAttemptCount,
+                DirectShaderSuccessCount = _nativeVideoDirectShaderSuccessCount,
+                DirectShaderSourcePlaneTexturesUnsupportedCount =
+                    _nativeVideoDirectShaderSourcePlaneTexturesUnsupportedCount,
+                DirectShaderShaderUnavailableCount =
+                    _nativeVideoDirectShaderShaderUnavailableCount,
+                DirectShaderAcquireSourcePlaneTexturesFailureCount =
+                    _nativeVideoDirectShaderAcquireSourcePlaneTexturesFailureCount,
+                DirectShaderPlaneTexturesUsabilityFailureCount =
+                    _nativeVideoDirectShaderPlaneTexturesUsabilityFailureCount,
+                DirectShaderMaterialFailureCount =
+                    _nativeVideoDirectShaderMaterialFailureCount,
+                DirectShaderExceptionCount = _nativeVideoDirectShaderExceptionCount,
+                ComputeAttemptCount = _nativeVideoComputeAttemptCount,
+                ComputeSuccessCount = _nativeVideoComputeSuccessCount,
+                ComputeSourcePlaneTexturesUnsupportedCount =
+                    _nativeVideoComputeSourcePlaneTexturesUnsupportedCount,
+                ComputeShaderUnavailableCount = _nativeVideoComputeShaderUnavailableCount,
+                ComputeAcquireSourcePlaneTexturesFailureCount =
+                    _nativeVideoComputeAcquireSourcePlaneTexturesFailureCount,
+                ComputePlaneTexturesUsabilityFailureCount =
+                    _nativeVideoComputePlaneTexturesUsabilityFailureCount,
+                ComputeExceptionCount = _nativeVideoComputeExceptionCount,
+            };
+
+            ResetNativeVideoPresentationTelemetryStats();
+            return true;
+        }
+
         private IEnumerator Start()
         {
             NativeInitializer.Initialize(this);
@@ -983,6 +1351,12 @@ namespace UnityAV
                 throw resolveError;
             }
 
+            _isRealtimeSource = preparedSource != null && preparedSource.IsRealtimeSource;
+            if (EnableAudio)
+            {
+                EnsureAudioSource();
+            }
+
             Debug.Log(
                 "[MediaPlayer] prepared_playable_source"
                 + " playback_uri=" + (preparedSource != null ? preparedSource.PlaybackUri : "null")
@@ -997,8 +1371,108 @@ namespace UnityAV
                 return;
             }
 
+            _nativeVideoUpdateCount += 1;
+            var updateRealtimeAt = UnityEngine.Time.realtimeSinceStartup;
+            var updateDeltaSec = _lastNativeVideoUpdateRealtimeAt >= 0f
+                ? updateRealtimeAt - _lastNativeVideoUpdateRealtimeAt
+                : 0f;
+            _lastNativeVideoUpdateRealtimeAt = updateRealtimeAt;
+
+            var updatePlayerStartTicks = DiagnosticsStopwatch.GetTimestamp();
             UpdatePlayer(_id);
+            var updatePlayerElapsedMs = ElapsedMilliseconds(updatePlayerStartTicks);
+            _nativeVideoUpdatePlayerElapsedMsSum += updatePlayerElapsedMs;
+            _nativeVideoUpdatePlayerElapsedMsMax = Math.Max(
+                _nativeVideoUpdatePlayerElapsedMsMax,
+                updatePlayerElapsedMs);
+
+            var updateNativeVideoStartTicks = DiagnosticsStopwatch.GetTimestamp();
             UpdateNativeVideoFrame();
+            var updateNativeVideoElapsedMs = ElapsedMilliseconds(updateNativeVideoStartTicks);
+            _nativeVideoUpdateNativeVideoFrameElapsedMsSum += updateNativeVideoElapsedMs;
+            _nativeVideoUpdateNativeVideoFrameElapsedMsMax = Math.Max(
+                _nativeVideoUpdateNativeVideoFrameElapsedMsMax,
+                updateNativeVideoElapsedMs);
+
+            var updateAudioStartTicks = DiagnosticsStopwatch.GetTimestamp();
+            UpdateAudioBuffer();
+            var updateAudioElapsedMs = ElapsedMilliseconds(updateAudioStartTicks);
+            _nativeVideoUpdateAudioBufferElapsedMsSum += updateAudioElapsedMs;
+            _nativeVideoUpdateAudioBufferElapsedMsMax = Math.Max(
+                _nativeVideoUpdateAudioBufferElapsedMsMax,
+                updateAudioElapsedMs);
+            UpdateNativeAudioSinkDelay();
+            MaybeLogNativeVideoStartupUpdate(
+                updateDeltaSec,
+                updatePlayerElapsedMs,
+                updateNativeVideoElapsedMs,
+                updateAudioElapsedMs);
+        }
+
+        private void MaybeLogNativeVideoStartupUpdate(
+            float updateDeltaSec,
+            double updatePlayerElapsedMs,
+            double updateNativeVideoElapsedMs,
+            double updateAudioElapsedMs)
+        {
+            if (!TraceNativeVideoCadence || !_nativeVideoPathActive)
+            {
+                return;
+            }
+
+            var startupSeconds = StartupElapsedSeconds;
+            var shouldLog = startupSeconds <= 1.0f
+                || updateDeltaSec >= 0.030f
+                || _nativeVideoFrameConsecutiveDuplicateCount > 0
+                || _nativeVideoFrameConsecutiveMissCount > 0;
+            if (!shouldLog)
+            {
+                return;
+            }
+
+            _nativeVideoStartupUpdateLogCount += 1;
+            if (startupSeconds > 1.0f
+                && _nativeVideoStartupUpdateLogCount > 150
+                && updateDeltaSec < 0.030f
+                && _nativeVideoFrameConsecutiveDuplicateCount == 0
+                && _nativeVideoFrameConsecutiveMissCount == 0)
+            {
+                return;
+            }
+
+            var bufferedSamples = 0;
+            var ringCapacity = 0;
+            lock (_audioLock)
+            {
+                bufferedSamples = _audioBufferedSamples;
+                ringCapacity = _audioRing != null ? _audioRing.Length : 0;
+            }
+
+            Debug.Log(
+                "[MediaPlayer] native_video_update_tick"
+                + " startup_seconds=" + startupSeconds.ToString("F3")
+                + " update_log_index=" + _nativeVideoStartupUpdateLogCount
+                + " update_delta_ms=" + (updateDeltaSec * 1000f).ToString("F1")
+                + " unity_delta_ms=" + (UnityEngine.Time.deltaTime * 1000f).ToString("F1")
+                + " unity_unscaled_delta_ms=" + (UnityEngine.Time.unscaledDeltaTime * 1000f).ToString("F1")
+                + " update_player_ms=" + updatePlayerElapsedMs.ToString("F2")
+                + " update_video_ms=" + updateNativeVideoElapsedMs.ToString("F2")
+                + " update_audio_ms=" + updateAudioElapsedMs.ToString("F2")
+                + " acquire_attempts=" + _nativeVideoFrameAcquireAttemptCount
+                + " acquire_misses=" + _nativeVideoFrameAcquireMissCount
+                + " duplicates=" + _nativeVideoFrameDuplicateAcquireCount
+                + " duplicate_streak=" + _nativeVideoFrameConsecutiveDuplicateCount
+                + " miss_streak=" + _nativeVideoFrameConsecutiveMissCount
+                + " presented_total=" + _nativeVideoFramePresentedCount
+                + " last_frame_index=" + _lastAcquiredNativeFrameIndex
+                + " last_frame_time=" + (_hasLastNativeVideoFrameInfo
+                    ? _lastNativeVideoFrameInfo.TimeSec.ToString("F3")
+                    : "NA")
+                + " audio_buffered_samples=" + bufferedSamples
+                + " audio_ring_capacity=" + ringCapacity
+                + " audio_playing=" + (_audioSource != null && _audioSource.isPlaying)
+                + " has_presented_frame=" + HasPresentedNativeVideoFrame
+                + " presentation_path=" + _nativeVideoPresentationPath);
         }
 
         private void InitializeNativePlayer(MediaSourceResolver.PreparedMediaSource preparedSource)
@@ -1113,6 +1587,7 @@ namespace UnityAV
                         + _nativeVideoInteropCaps.SourcePlaneTexturesSupported);
                     ApplyPresentedTexture(_targetTexture);
                     SetLoop(_id, Loop);
+                    UpdateNativeAudioSinkDelay();
                 }
                 else
                 {
@@ -1145,23 +1620,122 @@ namespace UnityAV
                 return;
             }
 
+            _nativeVideoFrameAcquireAttemptCount += 1;
+
             NativeVideoFrameInfo frameInfo;
             if (!TryAcquireNativeVideoFrameInfo(out frameInfo))
             {
+                _nativeVideoFrameAcquireMissCount += 1;
+                _nativeVideoFrameConsecutiveMissCount += 1;
+                if (ShouldWarmupFileNativeVideoStartupPresentation())
+                {
+                    _nativeVideoStartupWarmupStableFrameCount = 0;
+                }
+                _nativeVideoFrameMaxConsecutiveMissCount = Math.Max(
+                    _nativeVideoFrameMaxConsecutiveMissCount,
+                    _nativeVideoFrameConsecutiveMissCount);
+                if (TraceNativeVideoCadence
+                    && (_nativeVideoFrameConsecutiveMissCount == 1
+                        || _nativeVideoFrameConsecutiveMissCount % 15 == 0))
+                {
+                    Debug.Log(
+                        "[MediaPlayer] native_video_frame_acquire_miss"
+                        + " startup_seconds=" + StartupElapsedSeconds.ToString("F3")
+                        + " acquire_attempts=" + _nativeVideoFrameAcquireAttemptCount
+                        + " acquire_misses=" + _nativeVideoFrameAcquireMissCount
+                        + " miss_streak=" + _nativeVideoFrameConsecutiveMissCount
+                        + " presentation_path=" + _nativeVideoPresentationPath);
+                }
                 return;
             }
 
+            _nativeVideoFrameConsecutiveMissCount = 0;
+            var now = UnityEngine.Time.realtimeSinceStartup;
             try
             {
                 if (frameInfo.FrameIndex == _lastAcquiredNativeFrameIndex)
                 {
+                    _nativeVideoFrameDuplicateAcquireCount += 1;
+                    _nativeVideoFrameConsecutiveDuplicateCount += 1;
+                    if (ShouldWarmupFileNativeVideoStartupPresentation())
+                    {
+                        _nativeVideoStartupWarmupStableFrameCount = 0;
+                    }
+                    _nativeVideoFrameMaxConsecutiveDuplicateCount = Math.Max(
+                        _nativeVideoFrameMaxConsecutiveDuplicateCount,
+                        _nativeVideoFrameConsecutiveDuplicateCount);
+                    if (TraceNativeVideoCadence)
+                    {
+                        Debug.Log(
+                            "[MediaPlayer] native_video_frame_duplicate"
+                            + " startup_seconds=" + StartupElapsedSeconds.ToString("F3")
+                            + " frame_index=" + frameInfo.FrameIndex
+                            + " frame_time=" + frameInfo.TimeSec.ToString("F3")
+                            + " duplicates=" + _nativeVideoFrameDuplicateAcquireCount
+                            + " duplicate_streak=" + _nativeVideoFrameConsecutiveDuplicateCount
+                            + " acquire_attempts=" + _nativeVideoFrameAcquireAttemptCount
+                            + " acquire_misses=" + _nativeVideoFrameAcquireMissCount
+                            + " presentation_path=" + _nativeVideoPresentationPath);
+                    }
                     return;
                 }
+
+                _nativeVideoFrameConsecutiveDuplicateCount = 0;
+                var hasLastFrame = _hasLastNativeVideoFrameInfo;
+                var frameIndexDelta = hasLastFrame
+                    ? frameInfo.FrameIndex - _lastAcquiredNativeFrameIndex
+                    : 0;
+                var frameTimeDeltaSec = hasLastFrame
+                    ? frameInfo.TimeSec - _lastNativeVideoFrameInfo.TimeSec
+                    : 0.0;
+                var realtimeDeltaSec = _lastNativeVideoFrameAcquireRealtimeAt >= 0f
+                    ? now - _lastNativeVideoFrameAcquireRealtimeAt
+                    : 0.0f;
 
                 _lastAcquiredNativeFrameIndex = frameInfo.FrameIndex;
                 _lastNativeVideoFrameInfo = frameInfo;
                 _hasLastNativeVideoFrameInfo = true;
                 _nativeVideoFrameAcquireCount += 1;
+                _lastNativeVideoFrameAcquireRealtimeAt = now;
+
+                if (hasLastFrame)
+                {
+                    _nativeVideoFrameCadenceSampleCount += 1;
+                    _nativeVideoFrameLastIndexDelta = frameIndexDelta;
+                    _nativeVideoFrameLastTimeDeltaSec = frameTimeDeltaSec;
+                    _nativeVideoFrameLastRealtimeDeltaSec = realtimeDeltaSec;
+
+                    if (frameIndexDelta < 0)
+                    {
+                        _nativeVideoFrameNonMonotonicCount += 1;
+                    }
+                    else if (frameIndexDelta > 1)
+                    {
+                        _nativeVideoFrameSkippedFrameCount += frameIndexDelta - 1;
+                    }
+
+                    if (frameTimeDeltaSec <= 0.0)
+                    {
+                        _nativeVideoFrameNonMonotonicCount += 1;
+                    }
+                    else
+                    {
+                        _nativeVideoFrameTimeDeltaSumSec += frameTimeDeltaSec;
+                        _nativeVideoFrameTimeDeltaMinSec =
+                            Math.Min(_nativeVideoFrameTimeDeltaMinSec, frameTimeDeltaSec);
+                        _nativeVideoFrameTimeDeltaMaxSec =
+                            Math.Max(_nativeVideoFrameTimeDeltaMaxSec, frameTimeDeltaSec);
+                    }
+
+                    if (realtimeDeltaSec > 0.0)
+                    {
+                        _nativeVideoFrameRealtimeDeltaSumSec += realtimeDeltaSec;
+                        _nativeVideoFrameRealtimeDeltaMinSec =
+                            Math.Min(_nativeVideoFrameRealtimeDeltaMinSec, realtimeDeltaSec);
+                        _nativeVideoFrameRealtimeDeltaMaxSec =
+                            Math.Max(_nativeVideoFrameRealtimeDeltaMaxSec, realtimeDeltaSec);
+                    }
+                }
 
                 if (_firstNativeVideoFrameRealtimeAt < 0f)
                 {
@@ -1181,25 +1755,113 @@ namespace UnityAV
                             : string.Empty));
                 }
 
+                if (TraceNativeVideoCadence && StartupElapsedSeconds <= 0.200f)
+                {
+                    Debug.Log(
+                        "[MediaPlayer] native_video_warmup_eval"
+                        + " startup_seconds=" + StartupElapsedSeconds.ToString("F3")
+                        + " is_realtime=" + _isRealtimeSource
+                        + " native_active=" + _nativeVideoPathActive
+                        + " external_texture_target=" + _nativeVideoInteropCaps.ExternalTextureTarget
+                        + " presented_total=" + _nativeVideoFramePresentedCount
+                        + " presented_lifetime_total=" + _nativeVideoFramePresentedLifetimeCount
+                        + " warmup_completed=" + _nativeVideoStartupWarmupCompleted
+                        + " has_last_frame=" + hasLastFrame
+                        + " frame_index=" + frameInfo.FrameIndex
+                        + " frame_index_delta=" + frameIndexDelta
+                        + " frame_time_delta_ms=" + (frameTimeDeltaSec * 1000.0).ToString("F1")
+                        + " realtime_delta_ms=" + (realtimeDeltaSec * 1000.0).ToString("F1"));
+                }
+
+                if (ShouldHoldFileNativeVideoStartupPresentation(
+                    hasLastFrame,
+                    frameIndexDelta,
+                    frameTimeDeltaSec,
+                    realtimeDeltaSec))
+                {
+                    _nativeVideoStartupWarmupSuppressedFrameCount += 1;
+                    if (TraceNativeVideoCadence)
+                    {
+                        Debug.Log(
+                            "[MediaPlayer] native_video_startup_warmup_hold"
+                            + " startup_seconds=" + StartupElapsedSeconds.ToString("F3")
+                            + " frame_index=" + frameInfo.FrameIndex
+                            + " frame_time=" + frameInfo.TimeSec.ToString("F3")
+                            + " stable_count=" + _nativeVideoStartupWarmupStableFrameCount
+                            + " stable_target=" + FileNativeVideoStartupWarmupStableFrames
+                            + " suppressed_total=" + _nativeVideoStartupWarmupSuppressedFrameCount
+                            + " frame_index_delta=" + frameIndexDelta
+                            + " frame_time_delta_ms=" + (frameTimeDeltaSec * 1000.0).ToString("F1")
+                            + " realtime_delta_ms=" + (realtimeDeltaSec * 1000.0).ToString("F1"));
+                    }
+                    return;
+                }
+
+                var presentationPath = NativeVideoPresentationPathKind.None;
                 var handled = false;
                 if (PreferNativeVideoRenderEventPass)
                 {
                     handled = TryUseNativeRenderTarget(frameInfo);
+                    if (handled)
+                    {
+                        presentationPath = _nativeVideoPresentationPath;
+                    }
                 }
 
                 if (PreferNativeVideoUnityDirectShader)
                 {
-                    handled = handled || TryBindNativeVideoPlaneTexturesDirect(frameInfo);
+                    if (!handled)
+                    {
+                        handled = TryBindNativeVideoPlaneTexturesDirect(frameInfo);
+                        if (handled)
+                        {
+                            presentationPath = _nativeVideoPresentationPath;
+                        }
+                    }
                 }
 
                 if (!handled && PreferNativeVideoUnityCompute)
                 {
                     handled = TryRenderNativeVideoPlaneTextures(frameInfo);
+                    if (handled)
+                    {
+                        presentationPath = _nativeVideoPresentationPath;
+                    }
                 }
 
                 if (!handled && CanDirectlyBindNativeFrame(frameInfo))
                 {
                     handled = TryBindNativeTexture(frameInfo);
+                    if (handled)
+                    {
+                        presentationPath = _nativeVideoPresentationPath;
+                    }
+                }
+
+                if (handled)
+                {
+                    _nativeVideoFramePresentedCount += 1;
+                    _nativeVideoFramePresentedLifetimeCount += 1;
+                    _nativeVideoStartupWarmupCompleted = true;
+                    switch (presentationPath)
+                    {
+                        case NativeVideoPresentationPathKind.RenderEventPass:
+                            _nativeVideoFrameRenderEventPassCount += 1;
+                            break;
+                        case NativeVideoPresentationPathKind.DirectBind:
+                            _nativeVideoFrameDirectBindPresentCount += 1;
+                            break;
+                        case NativeVideoPresentationPathKind.DirectShader:
+                            _nativeVideoFrameDirectShaderPresentCount += 1;
+                            break;
+                        case NativeVideoPresentationPathKind.Compute:
+                            _nativeVideoFrameComputePresentCount += 1;
+                            break;
+                    }
+                }
+                else
+                {
+                    _nativeVideoFramePresentationFailureCount += 1;
                 }
 
                 if (!handled && !_nativeVideoBindingWarningIssued)
@@ -1215,6 +1877,31 @@ namespace UnityAV
                         + " source_plane_textures_supported="
                         + _nativeVideoInteropCaps.SourcePlaneTexturesSupported
                         + " flags=0x" + frameInfo.Flags.ToString("X"));
+                }
+
+                if (hasLastFrame
+                    && (TraceNativeVideoCadence
+                        || frameIndexDelta != 1
+                        || realtimeDeltaSec >= 0.050f
+                        || frameTimeDeltaSec <= 0.0))
+                {
+                    Debug.Log(
+                        "[MediaPlayer] native_video_frame_acquired"
+                        + " startup_seconds=" + StartupElapsedSeconds.ToString("F3")
+                        + " frame_index=" + frameInfo.FrameIndex
+                        + " frame_time=" + frameInfo.TimeSec.ToString("F3")
+                        + " frame_index_delta=" + frameIndexDelta
+                        + " frame_time_delta_ms=" + (frameTimeDeltaSec * 1000.0).ToString("F1")
+                        + " realtime_delta_ms=" + (realtimeDeltaSec * 1000.0).ToString("F1")
+                        + " acquire_attempts=" + _nativeVideoFrameAcquireAttemptCount
+                        + " acquire_misses=" + _nativeVideoFrameAcquireMissCount
+                        + " duplicates=" + _nativeVideoFrameDuplicateAcquireCount
+                        + " duplicate_streak_max=" + _nativeVideoFrameMaxConsecutiveDuplicateCount
+                        + " skip_total=" + _nativeVideoFrameSkippedFrameCount
+                        + " non_monotonic=" + _nativeVideoFrameNonMonotonicCount
+                        + " presented_total=" + _nativeVideoFramePresentedCount
+                        + " presentation_failures=" + _nativeVideoFramePresentationFailureCount
+                        + " presentation_path=" + presentationPath);
                 }
             }
             finally
@@ -1259,6 +1946,519 @@ namespace UnityAV
             }
         }
 
+        private void EnsureAudioSource()
+        {
+            if (!EnableAudio || _audioSource != null)
+            {
+                return;
+            }
+
+            _audioSource = GetComponent<AudioSource>();
+            if (_audioSource == null)
+            {
+                _audioSource = gameObject.AddComponent<AudioSource>();
+            }
+
+            _audioSource.playOnAwake = false;
+            _audioSource.loop = true;
+            _audioSource.spatialBlend = 0f;
+        }
+
+        private void UpdateAudioBuffer()
+        {
+            if (!EnableAudio || !ValidatePlayerId(_id))
+            {
+                return;
+            }
+
+            EnsureAudioSource();
+
+            var latestNativeBufferedBytes = 0;
+            for (var iteration = 0; iteration < MaxAudioCopyIterations; iteration++)
+            {
+                RustAVAudioMeta meta;
+                var status = GetAudioMetaPCM(_id, out meta);
+                if (status <= 0 || meta.BufferedBytes <= 0)
+                {
+                    latestNativeBufferedBytes = 0;
+                    break;
+                }
+
+                if (!EnsureAudioFormat(meta))
+                {
+                    break;
+                }
+
+                latestNativeBufferedBytes = meta.BufferedBytes;
+
+                var maxBufferedSamples = CalculateBufferedAudioCeilingSamples();
+                var bufferedSamples = 0;
+                lock (_audioLock)
+                {
+                    bufferedSamples = _audioBufferedSamples;
+                }
+
+                if (maxBufferedSamples > 0 && bufferedSamples >= maxBufferedSamples)
+                {
+                    break;
+                }
+
+                var bytesPerInterleavedSample = meta.BytesPerSample * meta.Channels;
+                if (bytesPerInterleavedSample <= 0)
+                {
+                    break;
+                }
+
+                var bytesToCopy = Math.Min(meta.BufferedBytes, MaxAudioCopyBytes);
+                if (maxBufferedSamples > 0)
+                {
+                    var remainingSamples = Math.Max(0, maxBufferedSamples - bufferedSamples);
+                    var remainingBytes = remainingSamples * meta.BytesPerSample;
+                    if (remainingBytes <= 0)
+                    {
+                        break;
+                    }
+
+                    bytesToCopy = Math.Min(bytesToCopy, remainingBytes);
+                }
+
+                bytesToCopy -= bytesToCopy % bytesPerInterleavedSample;
+                if (bytesToCopy <= 0)
+                {
+                    break;
+                }
+
+                if (_audioBytes.Length != bytesToCopy)
+                {
+                    _audioBytes = new byte[bytesToCopy];
+                }
+
+                var copied = CopyAudioPCM(_id, _audioBytes, _audioBytes.Length);
+                if (copied <= 0)
+                {
+                    break;
+                }
+
+                copied -= copied % bytesPerInterleavedSample;
+                if (copied <= 0)
+                {
+                    break;
+                }
+
+                latestNativeBufferedBytes = Math.Max(0, meta.BufferedBytes - copied);
+
+                var sampleCount = copied / meta.BytesPerSample;
+                if (_audioFloats.Length != sampleCount)
+                {
+                    _audioFloats = new float[sampleCount];
+                }
+
+                Buffer.BlockCopy(_audioBytes, 0, _audioFloats, 0, copied);
+                WriteAudioSamples(_audioFloats, sampleCount);
+
+                if (copied < bytesToCopy)
+                {
+                    break;
+                }
+            }
+
+            ObserveNativeBufferedAudioBytes(latestNativeBufferedBytes);
+            TryStartAudioSource();
+        }
+
+        private bool EnsureAudioFormat(RustAVAudioMeta meta)
+        {
+            if (meta.SampleRate <= 0
+                || meta.Channels <= 0
+                || meta.BytesPerSample != 4
+                || meta.SampleFormat != (int)RustAVAudioSampleFormat.Float32)
+            {
+                return false;
+            }
+
+            EnsureAudioSource();
+            if (_audioSource == null)
+            {
+                return false;
+            }
+
+            if (_audioClip != null
+                && _audioSampleRate == meta.SampleRate
+                && _audioChannels == meta.Channels
+                && _audioBytesPerSample == meta.BytesPerSample)
+            {
+                return true;
+            }
+
+            _audioSampleRate = meta.SampleRate;
+            _audioChannels = meta.Channels;
+            _audioBytesPerSample = meta.BytesPerSample;
+
+            var ringCapacity = Math.Max(_audioSampleRate * _audioChannels * 4, 4096);
+            if (_isRealtimeSource)
+            {
+                ringCapacity = Math.Max(
+                    (_audioSampleRate * _audioChannels
+                        * RealtimeAudioRingCapacityMilliseconds) / 1000,
+                    4096);
+            }
+
+            lock (_audioLock)
+            {
+                _audioRing = new float[ringCapacity];
+                _audioReadIndex = 0;
+                _audioWriteIndex = 0;
+                _audioBufferedSamples = 0;
+            }
+
+            ObserveNativeBufferedAudioBytes(0);
+
+            if (_audioSource.isPlaying)
+            {
+                _audioSource.Stop();
+            }
+
+            if (_audioClip != null)
+            {
+                if (ReferenceEquals(_audioSource.clip, _audioClip))
+                {
+                    _audioSource.clip = null;
+                }
+
+                Destroy(_audioClip);
+            }
+
+            _audioClip = AudioClip.Create(
+                Uri + "_Audio",
+                _audioSampleRate * StreamingAudioClipLengthSeconds,
+                _audioChannels,
+                _audioSampleRate,
+                true,
+                OnAudioRead,
+                OnAudioSetPosition);
+
+            _audioSource.clip = _audioClip;
+            _audioSource.loop = true;
+            return true;
+        }
+
+        private void WriteAudioSamples(float[] samples, int sampleCount)
+        {
+            if (samples == null || sampleCount <= 0)
+            {
+                return;
+            }
+
+            lock (_audioLock)
+            {
+                if (_audioRing == null || _audioRing.Length == 0)
+                {
+                    return;
+                }
+
+                if (sampleCount >= _audioRing.Length)
+                {
+                    Array.Copy(
+                        samples,
+                        sampleCount - _audioRing.Length,
+                        _audioRing,
+                        0,
+                        _audioRing.Length);
+                    _audioReadIndex = 0;
+                    _audioWriteIndex = 0;
+                    _audioBufferedSamples = _audioRing.Length;
+                    TrimBufferedAudioSamplesIfNeeded();
+                    return;
+                }
+
+                var freeSamples = _audioRing.Length - _audioBufferedSamples;
+                if (sampleCount > freeSamples)
+                {
+                    var dropSamples = sampleCount - freeSamples;
+                    _audioReadIndex = (_audioReadIndex + dropSamples) % _audioRing.Length;
+                    _audioBufferedSamples -= dropSamples;
+                }
+
+                var firstCopy = Math.Min(sampleCount, _audioRing.Length - _audioWriteIndex);
+                Array.Copy(samples, 0, _audioRing, _audioWriteIndex, firstCopy);
+
+                var secondCopy = sampleCount - firstCopy;
+                if (secondCopy > 0)
+                {
+                    Array.Copy(samples, firstCopy, _audioRing, 0, secondCopy);
+                }
+
+                _audioWriteIndex = (_audioWriteIndex + sampleCount) % _audioRing.Length;
+                _audioBufferedSamples += sampleCount;
+                TrimBufferedAudioSamplesIfNeeded();
+            }
+        }
+
+        private void TrimBufferedAudioSamplesIfNeeded()
+        {
+            if (_audioRing == null || _audioRing.Length == 0)
+            {
+                return;
+            }
+
+            var maxBufferedSamples = CalculateBufferedAudioCeilingSamples();
+            if (maxBufferedSamples <= 0 || _audioBufferedSamples <= maxBufferedSamples)
+            {
+                return;
+            }
+
+            var dropSamples = _audioBufferedSamples - maxBufferedSamples;
+            _audioReadIndex = (_audioReadIndex + dropSamples) % _audioRing.Length;
+            _audioBufferedSamples = maxBufferedSamples;
+        }
+
+        private int CalculateBufferedAudioCeilingSamples()
+        {
+            if (_audioSampleRate <= 0 || _audioChannels <= 0)
+            {
+                return 0;
+            }
+
+            var steadyStateMilliseconds = _isRealtimeSource
+                ? RealtimeAudioBufferedCeilingMilliseconds
+                : FileAudioBufferedCeilingMilliseconds;
+            var steadyStateSamples = (_audioSampleRate * _audioChannels * steadyStateMilliseconds)
+                / 1000;
+            steadyStateSamples = Math.Max(steadyStateSamples, _audioChannels);
+
+            if (_audioSource != null && _audioSource.isPlaying)
+            {
+                return steadyStateSamples;
+            }
+
+            return CalculateAudioStartThresholdSamples();
+        }
+
+        private void OnAudioRead(float[] data)
+        {
+            if (data == null || data.Length == 0)
+            {
+                return;
+            }
+
+            Array.Clear(data, 0, data.Length);
+
+            lock (_audioLock)
+            {
+                if (_audioBufferedSamples <= 0 || _audioRing == null || _audioRing.Length == 0)
+                {
+                    return;
+                }
+
+                var samplesToRead = Math.Min(data.Length, _audioBufferedSamples);
+                var firstCopy = Math.Min(samplesToRead, _audioRing.Length - _audioReadIndex);
+                Array.Copy(_audioRing, _audioReadIndex, data, 0, firstCopy);
+
+                var secondCopy = samplesToRead - firstCopy;
+                if (secondCopy > 0)
+                {
+                    Array.Copy(_audioRing, 0, data, firstCopy, secondCopy);
+                }
+
+                _audioReadIndex = (_audioReadIndex + samplesToRead) % _audioRing.Length;
+                _audioBufferedSamples -= samplesToRead;
+            }
+        }
+
+        private void OnAudioSetPosition(int position)
+        {
+            _ = position;
+        }
+
+        private void ClearAudioBuffer()
+        {
+            lock (_audioLock)
+            {
+                _audioReadIndex = 0;
+                _audioWriteIndex = 0;
+                _audioBufferedSamples = 0;
+                if (_audioRing != null && _audioRing.Length > 0)
+                {
+                    Array.Clear(_audioRing, 0, _audioRing.Length);
+                }
+            }
+
+            ObserveNativeBufferedAudioBytes(0);
+            UpdateNativeAudioSinkDelay();
+        }
+
+        private void TryStartAudioSource()
+        {
+            if (!EnableAudio || !AutoStartAudio || !_playRequested || _audioSource == null || _audioClip == null)
+            {
+                return;
+            }
+
+            if (_audioSource.isPlaying)
+            {
+                return;
+            }
+
+            lock (_audioLock)
+            {
+                if (_audioSampleRate <= 0 || _audioChannels <= 0)
+                {
+                    return;
+                }
+
+                if (_isRealtimeSource && _nativeVideoPathActive && !HasPresentedNativeVideoFrame)
+                {
+                    return;
+                }
+
+                var thresholdSamples = CalculateAudioStartThresholdSamples();
+                if (_audioBufferedSamples < thresholdSamples)
+                {
+                    return;
+                }
+            }
+
+            _audioSource.Play();
+            UpdateNativeAudioSinkDelay();
+        }
+
+        private int CalculateAudioStartThresholdSamples()
+        {
+            if (_audioSampleRate <= 0 || _audioChannels <= 0)
+            {
+                return 0;
+            }
+
+            var thresholdMilliseconds = _isRealtimeSource
+                ? RealtimeAudioStartThresholdMilliseconds
+                : FileAudioStartThresholdMilliseconds;
+            var thresholdSamples = (_audioSampleRate * _audioChannels * thresholdMilliseconds)
+                / 1000;
+            if (!_isRealtimeSource)
+            {
+                return Math.Max(thresholdSamples, _audioChannels);
+            }
+
+            var startupElapsedMilliseconds = StartupElapsedSeconds * 1000f;
+            var hasStartupFrame = !_nativeVideoPathActive || HasPresentedNativeVideoFrame;
+            if (!hasStartupFrame || startupElapsedMilliseconds < RealtimeAudioStartupGraceMilliseconds)
+            {
+                return Math.Max(thresholdSamples, _audioChannels);
+            }
+
+            var relaxedThresholdSamples = (_audioSampleRate * _audioChannels
+                * RealtimeAudioStartupMinimumThresholdMilliseconds) / 1000;
+            return Math.Max(Math.Min(thresholdSamples, relaxedThresholdSamples), _audioChannels);
+        }
+
+        private void ObserveNativeBufferedAudioBytes(int bufferedBytes)
+        {
+            _nativeBufferedAudioBytes = Math.Max(0, bufferedBytes);
+        }
+
+        private void UpdateNativeAudioSinkDelay()
+        {
+            if (!ValidatePlayerId(_id))
+            {
+                return;
+            }
+
+            SetAudioSinkDelaySeconds(_id, ComputeUnityAudioPipelineDelaySeconds());
+        }
+
+        private double ComputeUnityAudioPipelineDelaySeconds()
+        {
+            if (!EnableAudio)
+            {
+                return 0.0;
+            }
+
+            var delaySec = 0.0;
+            var audioStarted = _audioSource != null && _audioSource.isPlaying;
+            if (_audioSampleRate > 0 && _audioChannels > 0)
+            {
+                delaySec += BufferedAudioSecondsFromBytes(_nativeBufferedAudioBytes);
+                if (!_isRealtimeSource || audioStarted)
+                {
+                    lock (_audioLock)
+                    {
+                        delaySec += (double)_audioBufferedSamples / (_audioSampleRate * _audioChannels);
+                    }
+                }
+
+                int dspBufferLength;
+                int dspBufferCount;
+                AudioSettings.GetDSPBufferSize(out dspBufferLength, out dspBufferCount);
+                if (dspBufferLength > 0 && dspBufferCount > 0)
+                {
+                    delaySec += (double)(dspBufferLength * dspBufferCount) / _audioSampleRate;
+                }
+            }
+
+            var realtimeAdditionalDelayMilliseconds =
+                GetRealtimeAdditionalAudioSinkDelayMilliseconds(audioStarted);
+            if (realtimeAdditionalDelayMilliseconds > 0)
+            {
+                delaySec += (double)realtimeAdditionalDelayMilliseconds / 1000.0;
+            }
+
+            return delaySec;
+        }
+
+        private int GetRealtimeAdditionalAudioSinkDelayMilliseconds(bool audioStarted)
+        {
+            if (!_isRealtimeSource)
+            {
+                return 0;
+            }
+
+            var delayMilliseconds = audioStarted
+                ? RealtimeAdditionalAudioSinkDelayMilliseconds
+                : RealtimeStartupAdditionalAudioSinkDelayMilliseconds;
+            if (_actualBackendKind == MediaBackendKind.Ffmpeg)
+            {
+                delayMilliseconds += RealtimeFfmpegAdditionalAudioSinkDelayMilliseconds;
+            }
+
+            return delayMilliseconds;
+        }
+
+        private double BufferedAudioSecondsFromBytes(int bufferedBytes)
+        {
+            if (bufferedBytes <= 0
+                || _audioSampleRate <= 0
+                || _audioChannels <= 0
+                || _audioBytesPerSample <= 0)
+            {
+                return 0.0;
+            }
+
+            var bytesPerSecond = _audioSampleRate * _audioChannels * _audioBytesPerSample;
+            if (bytesPerSecond <= 0)
+            {
+                return 0.0;
+            }
+
+            return (double)bufferedBytes / bytesPerSecond;
+        }
+
+        private void ResetManagedAudioState()
+        {
+            _audioBytes = new byte[0];
+            _audioFloats = new float[0];
+            _audioSampleRate = 0;
+            _audioChannels = 0;
+            _audioBytesPerSample = 0;
+            _nativeBufferedAudioBytes = 0;
+            lock (_audioLock)
+            {
+                _audioRing = new float[0];
+                _audioReadIndex = 0;
+                _audioWriteIndex = 0;
+                _audioBufferedSamples = 0;
+            }
+        }
+
         private static bool ValidatePlayerId(int id)
         {
             return id >= 0;
@@ -1278,6 +2478,7 @@ namespace UnityAV
         private bool TryUseNativeRenderTarget(NativeVideoFrameInfo frameInfo)
         {
 #if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+            _nativeVideoRenderEventPassAttemptCount += 1;
             if (_targetTexture == null)
             {
                 return false;
@@ -1312,6 +2513,7 @@ namespace UnityAV
             _nativeVideoDirectShaderPathActive = false;
             _nativeVideoComputePathActive = false;
             _nativeVideoPresentationPath = NativeVideoPresentationPathKind.RenderEventPass;
+            _nativeVideoRenderEventPassSuccessCount += 1;
             return true;
 #else
             return false;
@@ -1566,6 +2768,7 @@ namespace UnityAV
         private bool TryBindNativeTexture(NativeVideoFrameInfo frameInfo)
         {
 #if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+            _nativeVideoDirectBindAttemptCount += 1;
             try
             {
                 var requiresRecreate = _boundNativeTexture == null
@@ -1616,6 +2819,7 @@ namespace UnityAV
                 _nativeVideoComputePathActive = false;
                 _nativeVideoPresentationPath = NativeVideoPresentationPathKind.DirectBind;
                 _nativeTextureBindCount += 1;
+                _nativeVideoDirectBindSuccessCount += 1;
                 return true;
             }
             catch (Exception exception)
@@ -1644,14 +2848,17 @@ namespace UnityAV
         private bool TryBindNativeVideoPlaneTexturesDirect(NativeVideoFrameInfo frameInfo)
         {
 #if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+            _nativeVideoDirectShaderAttemptCount += 1;
             if (!_nativeVideoInteropCaps.SourcePlaneTexturesSupported)
             {
+                _nativeVideoDirectShaderSourcePlaneTexturesUnsupportedCount += 1;
                 return false;
             }
 
             var directShader = ResolveNativeVideoNv12DirectShader();
             if (directShader == null)
             {
+                _nativeVideoDirectShaderShaderUnavailableCount += 1;
                 if (!_nativeVideoDirectShaderWarningIssued)
                 {
                     _nativeVideoDirectShaderWarningIssued = true;
@@ -1665,11 +2872,13 @@ namespace UnityAV
             NativeVideoPlaneTexturesInfo texturesInfo;
             if (!TryAcquireNativeVideoSourcePlaneTexturesInfo(out texturesInfo))
             {
+                _nativeVideoDirectShaderAcquireSourcePlaneTexturesFailureCount += 1;
                 return false;
             }
 
             if (!CanUseUnityComputePlaneTextures(texturesInfo))
             {
+                _nativeVideoDirectShaderPlaneTexturesUsabilityFailureCount += 1;
                 if (!_nativeVideoDirectShaderWarningIssued)
                 {
                     _nativeVideoDirectShaderWarningIssued = true;
@@ -1725,10 +2934,12 @@ namespace UnityAV
                 _nativeVideoPresentationPath = NativeVideoPresentationPathKind.DirectShader;
                 _nativeTextureBound = false;
                 _nativeVideoComputePathActive = false;
+                _nativeVideoDirectShaderSuccessCount += 1;
                 return true;
             }
             catch (Exception exception)
             {
+                _nativeVideoDirectShaderExceptionCount += 1;
                 if (!_nativeVideoDirectShaderWarningIssued)
                 {
                     _nativeVideoDirectShaderWarningIssued = true;
@@ -1756,14 +2967,17 @@ namespace UnityAV
         private bool TryRenderNativeVideoPlaneTextures(NativeVideoFrameInfo frameInfo)
         {
 #if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+            _nativeVideoComputeAttemptCount += 1;
             if (!_nativeVideoInteropCaps.SourcePlaneTexturesSupported)
             {
+                _nativeVideoComputeSourcePlaneTexturesUnsupportedCount += 1;
                 return false;
             }
 
             var computeShader = ResolveNativeVideoNv12ComputeShader();
             if (computeShader == null)
             {
+                _nativeVideoComputeShaderUnavailableCount += 1;
                 if (!_nativeVideoComputeWarningIssued)
                 {
                     _nativeVideoComputeWarningIssued = true;
@@ -1777,11 +2991,13 @@ namespace UnityAV
             NativeVideoPlaneTexturesInfo texturesInfo;
             if (!TryAcquireNativeVideoSourcePlaneTexturesInfo(out texturesInfo))
             {
+                _nativeVideoComputeAcquireSourcePlaneTexturesFailureCount += 1;
                 return false;
             }
 
             if (!CanUseUnityComputePlaneTextures(texturesInfo))
             {
+                _nativeVideoComputePlaneTexturesUsabilityFailureCount += 1;
                 if (!_nativeVideoComputeWarningIssued)
                 {
                     _nativeVideoComputeWarningIssued = true;
@@ -1843,10 +3059,12 @@ namespace UnityAV
                 _nativePlaneTextureBindCount += 1;
                 _nativeVideoPresentationPath = NativeVideoPresentationPathKind.Compute;
                 _nativeTextureBound = false;
+                _nativeVideoComputeSuccessCount += 1;
                 return true;
             }
             catch (Exception exception)
             {
+                _nativeVideoComputeExceptionCount += 1;
                 if (!_nativeVideoComputeWarningIssued)
                 {
                     _nativeVideoComputeWarningIssued = true;
@@ -2101,8 +3319,15 @@ namespace UnityAV
             _lastNativeVideoFrameInfo = default(NativeVideoFrameInfo);
             _hasLastNativeVideoFrameInfo = false;
             _lastAcquiredNativeFrameIndex = -1;
+            _lastNativeVideoFrameAcquireRealtimeAt = -1f;
             _nativeVideoFrameAcquireCount = 0;
             _nativeVideoFrameReleaseCount = 0;
+            _nativeVideoFramePresentedLifetimeCount = 0;
+            _nativeVideoStartupWarmupStableFrameCount = 0;
+            _nativeVideoStartupWarmupSuppressedFrameCount = 0;
+            _nativeVideoStartupWarmupCompleted = false;
+            ResetNativeVideoFrameCadenceStats();
+            ResetNativeVideoUpdateTimingStats();
             _nativeVideoBindingWarningIssued = false;
             _nativeVideoDirectShaderWarningIssued = false;
             _nativeVideoComputeWarningIssued = false;
@@ -2122,6 +3347,121 @@ namespace UnityAV
             _lastBoundNativePlaneUVHandle = IntPtr.Zero;
             _lastBoundNativePlaneYFormat = NativeVideoPlaneTextureFormatKind.Unknown;
             _lastBoundNativePlaneUVFormat = NativeVideoPlaneTextureFormatKind.Unknown;
+            ResetNativeVideoPresentationTelemetryStats();
+        }
+
+        private void ResetNativeVideoFrameCadenceStats()
+        {
+            _nativeVideoFrameAcquireAttemptCount = 0;
+            _nativeVideoFrameAcquireMissCount = 0;
+            _nativeVideoFrameDuplicateAcquireCount = 0;
+            _nativeVideoFrameConsecutiveDuplicateCount = 0;
+            _nativeVideoFrameMaxConsecutiveDuplicateCount = 0;
+            _nativeVideoFrameConsecutiveMissCount = 0;
+            _nativeVideoFrameMaxConsecutiveMissCount = 0;
+            _nativeVideoFramePresentedCount = 0;
+            _nativeVideoFramePresentationFailureCount = 0;
+            _nativeVideoFrameRenderEventPassCount = 0;
+            _nativeVideoFrameDirectBindPresentCount = 0;
+            _nativeVideoFrameDirectShaderPresentCount = 0;
+            _nativeVideoFrameComputePresentCount = 0;
+            _nativeVideoFrameSkippedFrameCount = 0;
+            _nativeVideoFrameNonMonotonicCount = 0;
+            _nativeVideoFrameCadenceSampleCount = 0;
+            _nativeVideoFrameLastIndexDelta = 0;
+            _nativeVideoFrameLastTimeDeltaSec = 0.0;
+            _nativeVideoFrameLastRealtimeDeltaSec = 0.0;
+            _nativeVideoFrameTimeDeltaSumSec = 0.0;
+            _nativeVideoFrameTimeDeltaMinSec = double.PositiveInfinity;
+            _nativeVideoFrameTimeDeltaMaxSec = 0.0;
+            _nativeVideoFrameRealtimeDeltaSumSec = 0.0;
+            _nativeVideoFrameRealtimeDeltaMinSec = double.PositiveInfinity;
+            _nativeVideoFrameRealtimeDeltaMaxSec = 0.0;
+        }
+
+        private void ResetNativeVideoUpdateTimingStats()
+        {
+            _nativeVideoUpdateCount = 0;
+            _lastNativeVideoUpdateRealtimeAt = -1f;
+            _nativeVideoStartupUpdateLogCount = 0;
+            _nativeVideoUpdatePlayerElapsedMsSum = 0.0;
+            _nativeVideoUpdatePlayerElapsedMsMax = 0.0;
+            _nativeVideoUpdateNativeVideoFrameElapsedMsSum = 0.0;
+            _nativeVideoUpdateNativeVideoFrameElapsedMsMax = 0.0;
+            _nativeVideoUpdateAudioBufferElapsedMsSum = 0.0;
+            _nativeVideoUpdateAudioBufferElapsedMsMax = 0.0;
+        }
+
+        private void ResetNativeVideoPresentationTelemetryStats()
+        {
+            _nativeVideoRenderEventPassAttemptCount = 0;
+            _nativeVideoRenderEventPassSuccessCount = 0;
+            _nativeVideoDirectBindAttemptCount = 0;
+            _nativeVideoDirectBindSuccessCount = 0;
+            _nativeVideoDirectShaderAttemptCount = 0;
+            _nativeVideoDirectShaderSuccessCount = 0;
+            _nativeVideoDirectShaderSourcePlaneTexturesUnsupportedCount = 0;
+            _nativeVideoDirectShaderShaderUnavailableCount = 0;
+            _nativeVideoDirectShaderAcquireSourcePlaneTexturesFailureCount = 0;
+            _nativeVideoDirectShaderPlaneTexturesUsabilityFailureCount = 0;
+            _nativeVideoDirectShaderMaterialFailureCount = 0;
+            _nativeVideoDirectShaderExceptionCount = 0;
+            _nativeVideoComputeAttemptCount = 0;
+            _nativeVideoComputeSuccessCount = 0;
+            _nativeVideoComputeSourcePlaneTexturesUnsupportedCount = 0;
+            _nativeVideoComputeShaderUnavailableCount = 0;
+            _nativeVideoComputeAcquireSourcePlaneTexturesFailureCount = 0;
+            _nativeVideoComputePlaneTexturesUsabilityFailureCount = 0;
+            _nativeVideoComputeExceptionCount = 0;
+        }
+
+        private bool ShouldWarmupFileNativeVideoStartupPresentation()
+        {
+            return !_isRealtimeSource
+                && _nativeVideoPathActive
+                && _nativeVideoInteropCaps.ExternalTextureTarget
+                && !_nativeVideoStartupWarmupCompleted
+                && _nativeVideoFramePresentedLifetimeCount == 0;
+        }
+
+        private bool ShouldHoldFileNativeVideoStartupPresentation(
+            bool hasLastFrame,
+            long frameIndexDelta,
+            double frameTimeDeltaSec,
+            float realtimeDeltaSec)
+        {
+            if (!ShouldWarmupFileNativeVideoStartupPresentation())
+            {
+                return false;
+            }
+
+            if (!hasLastFrame)
+            {
+                _nativeVideoStartupWarmupStableFrameCount = 0;
+                return true;
+            }
+
+            var stableCadence = frameIndexDelta == 1
+                && frameTimeDeltaSec > 0.0
+                && realtimeDeltaSec > 0.0f
+                && realtimeDeltaSec <= 0.025f;
+            if (stableCadence)
+            {
+                _nativeVideoStartupWarmupStableFrameCount += 1;
+            }
+            else
+            {
+                _nativeVideoStartupWarmupStableFrameCount = 0;
+            }
+
+            return _nativeVideoStartupWarmupStableFrameCount
+                < FileNativeVideoStartupWarmupStableFrames;
+        }
+
+        private static double ElapsedMilliseconds(long startTicks)
+        {
+            return (DiagnosticsStopwatch.GetTimestamp() - startTicks) * 1000.0
+                / DiagnosticsStopwatch.Frequency;
         }
         private void ReleaseNativePlayer()
         {
@@ -2130,6 +3470,13 @@ namespace UnityAV
                 return;
             }
 
+            if (_audioSource != null)
+            {
+                _audioSource.Stop();
+            }
+
+            ClearAudioBuffer();
+            SetAudioSinkDelaySeconds(_id, 0.0);
             NativeInitializer.UnregisterPlayerRenderEvent(_id);
             var result = ReleasePlayer(_id);
             _id = InvalidPlayerId;
@@ -2138,6 +3485,7 @@ namespace UnityAV
             _actualBackendKind = MediaBackendKind.Auto;
             _nativeVideoPathActive = false;
             _nativeVideoInteropCaps = default(MediaNativeInteropCommon.NativeVideoInteropCapsView);
+            _isRealtimeSource = false;
             ResetNativeVideoTelemetry();
 
             if (result < 0)
@@ -2155,6 +3503,13 @@ namespace UnityAV
 
             try
             {
+                if (_audioSource != null)
+                {
+                    _audioSource.Stop();
+                }
+
+                ClearAudioBuffer();
+                SetAudioSinkDelaySeconds(_id, 0.0);
                 NativeInitializer.UnregisterPlayerRenderEvent(_id);
                 ReleasePlayer(_id);
             }
@@ -2168,11 +3523,29 @@ namespace UnityAV
             _actualBackendKind = MediaBackendKind.Auto;
             _nativeVideoPathActive = false;
             _nativeVideoInteropCaps = default(MediaNativeInteropCommon.NativeVideoInteropCapsView);
+            _isRealtimeSource = false;
             ResetNativeVideoTelemetry();
         }
 
         private void ReleaseManagedResources()
         {
+            if (_audioSource != null)
+            {
+                _audioSource.Stop();
+                if (ReferenceEquals(_audioSource.clip, _audioClip))
+                {
+                    _audioSource.clip = null;
+                }
+            }
+
+            if (_audioClip != null)
+            {
+                Destroy(_audioClip);
+                _audioClip = null;
+            }
+
+            ResetManagedAudioState();
+
             if (TargetMaterial != null
                 && (ReferenceEquals(TargetMaterial.mainTexture, _targetTexture)
                     || ReferenceEquals(TargetMaterial.mainTexture, _boundNativeTexture)
@@ -2317,7 +3690,7 @@ namespace UnityAV
                 GetBackendRuntimeDiagnostic,
                 PreferredBackend,
                 uri,
-                false);
+                EnableAudio);
         }
 
         private void TryCreateNativeVideoPlayer(
